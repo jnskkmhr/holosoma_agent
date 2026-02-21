@@ -4,6 +4,8 @@ from typing import Dict, List, Sequence
 
 import torch
 
+from holosoma_agent.configs.symmetry_config import SymmetryConfig
+
 
 class SymmetryUtils:
     """X-Z plane symmetry utilities for humanoid robots.
@@ -11,69 +13,48 @@ class SymmetryUtils:
     Unlike the holosoma version, this class does **not** read ``env.robot_config``
     or ``env.observation_manager``. All information is passed explicitly at
     construction time, making it fully decoupled from the environment.
-
-    Parameters
-    ----------
-    dof_names : list[str]
-        Ordered list of DOF names in the robot (defines the action vector layout).
-    symmetry_joint_names : dict[str, str]
-        Mapping ``{left_joint_name: right_joint_name}`` for left-right joint swapping.
-    flip_sign_joint_names : list[str]
-        DOF names whose sign must be flipped when mirroring.
-    obs_dims : dict[str, int]
-        Flat dimension of each observation group (history already included).
-    history_lengths : dict[str, int]
-        History factor per observation group.
-    sub_obs_keys : dict[str, list[str]]
-        Ordered sub-observation keys per group (must have a ``mirror_obs_<key>`` method
-        defined on this class for each).
-    obs_dims_single_frame : dict[str, int]
-        Single-frame (no history) flat dimension per group.
-    sub_obs_indices_single_frame : dict[str, dict[str, torch.Tensor]]
-        Per-group, per-sub-key index tensors into the single-frame obs vector.
-    device : str
     """
 
     def __init__(
         self,
-        dof_names: List[str],
-        symmetry_joint_names: Dict[str, str],
-        flip_sign_joint_names: List[str],
-        obs_dims: Dict[str, int],
-        history_lengths: Dict[str, int],
-        sub_obs_keys: Dict[str, List[str]],
-        obs_dims_single_frame: Dict[str, int],
-        sub_obs_indices_single_frame: Dict[str, Dict[str, torch.Tensor]],
-        device: str = "cpu",
+        cfg: SymmetryConfig,
+        device: torch.device | str = None,
     ) -> None:
+
         self.device = device
-        self.observation_dims = obs_dims
-        self.history_lengths = history_lengths
-        self.sub_observation_keys = sub_obs_keys
-        self.observation_dims_single_frame = obs_dims_single_frame
-        self.sub_observation_indices_single_frame = sub_obs_indices_single_frame
+        self.cfg = cfg
 
-        # Build joint index map
-        name_to_idx = {name: i for i, name in enumerate(dof_names)}
-        joint_index_mapping = {}
-        for j1, j2 in symmetry_joint_names.items():
-            if j1 in name_to_idx and j2 in name_to_idx:
-                joint_index_mapping[name_to_idx[j1]] = name_to_idx[j2]
-        self.joint_index_map = torch.tensor(
-            [joint_index_mapping.get(i, i) for i in range(len(dof_names))],
-            device=device,
-            dtype=torch.long,
-        )
+        # Initialize attributes that will be set during initialization
+        self.observation_dims: Dict[str, int] = {}
+        self.observation_dims_single_frame: Dict[
+            str, int
+        ] = {}  # Dimension without history
+        self.history_lengths: Dict[str, int] = {}
+        self.sub_observation_keys: Dict[str, List[str]] = {}
+        self.sub_observation_indices: Dict[str, Dict[str, torch.Tensor]] = {}
+        self.sub_observation_indices_single_frame: Dict[
+            str, Dict[str, torch.Tensor]
+        ] = {}  # Indices within single frame
+        self.sub_observation_dims: Dict[str, int] = {}
+        self.joint_index_map: torch.Tensor = torch.empty(0)
+        self.sign_flip_mask: torch.Tensor = torch.empty(0)
 
-        # Build sign flip mask
-        flip_indices = {
-            name_to_idx[n] for n in flip_sign_joint_names if n in name_to_idx
-        }
-        self.sign_flip_mask = torch.tensor(
-            [-1.0 if i in flip_indices else 1.0 for i in range(len(dof_names))],
-            device=device,
-            dtype=torch.float,
-        )
+        self._init_observation_config()
+        self._init_joint_config()
+
+    """
+    initialization
+    """
+
+    def _init_observation_config(self) -> None:
+        pass
+
+    def _init_joint_config(self) -> None:
+        pass
+
+    """
+    augmentation code
+    """
 
     def augment_observations(
         self, obs: torch.Tensor, obs_list: Sequence[str]
