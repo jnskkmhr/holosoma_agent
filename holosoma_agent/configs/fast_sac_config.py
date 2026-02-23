@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
+from .symmetry_config import SymmetryConfig
+
 
 @dataclass
 class FastSACConfig:
@@ -88,6 +90,7 @@ class FastSACConfig:
     obs_normalization: bool = True
 
     use_symmetry: bool = False
+    symmetry_config: SymmetryConfig | None = None
 
     amp: bool = True
     """Automatic Mixed Precision."""

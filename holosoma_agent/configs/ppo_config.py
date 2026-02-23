@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
+from .symmetry_config import SymmetryConfig
+
 
 @dataclass
 class PPOConfig:
@@ -70,6 +72,7 @@ class PPOConfig:
     # ── Symmetry augmentation ─────────────────────────────────────────────────
     use_symmetry: bool = False
     """Whether to apply x-z plane symmetry augmentation during training."""
+    symmetry_config: SymmetryConfig | None = None
 
     symmetry_actor_coef: float = 1.0
     symmetry_critic_coef: float = 0.0

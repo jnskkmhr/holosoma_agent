@@ -8,6 +8,6 @@ from typing import List
 class SymmetryConfig:
     """Symmetry configuration for X-Z plane mirroring."""
 
-    sub_observation_dims: dict[str, dict[str, int]] = MISSING
     joint_names: list[str] = MISSING
+    symmetry_joint_names: dict[str, str] = MISSING
     sign_flip_joints: list[str] = MISSING

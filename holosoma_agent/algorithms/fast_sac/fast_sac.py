@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import time
 import itertools
 import math
@@ -27,7 +28,7 @@ from holosoma_agent.algorithms.fast_sac.fast_sac_utils import (
     SimpleReplayBuffer,
     save_params,
 )
-from holosoma_agent.algorithms.modules.augmentation_utils import SymmetryUtils
+from holosoma_agent.algorithms.modules.symmetry_utils import SymmetryUtils
 from holosoma_agent.utils.logger import Logger
 from holosoma_agent.configs.fast_sac_config import FastSACConfig
 from holosoma_agent.env.fast_sac_env import FastSACVecEnv
@@ -55,12 +56,10 @@ class FastSACAgent(BaseAlgo):
         config: FastSACConfig,
         device: str,
         log_dir: str | pathlib.Path = "./logs",
-        symmetry_utils: SymmetryUtils | None = None,
         multi_gpu_cfg: dict | None = None,
     ):
         super().__init__(env, config, device, multi_gpu_cfg)
         self.log_dir = log_dir
-        self.symmetry_utils = symmetry_utils
         self.global_step: int = 0
 
         # Will be populated by setup()
@@ -211,17 +210,10 @@ class FastSACAgent(BaseAlgo):
             device=self.device,
         )
 
-        # writer = SummaryWriter(log_dir=str(self.log_dir))
-        # self.logging_helper = LoggingHelper(
-        #     writer=writer,
-        #     log_dir=self.log_dir,
-        #     num_envs=env.num_envs * self.gpu_world_size,
-        #     num_steps_per_env=1,
-        #     num_learning_iterations=self.config.num_learning_iterations,
-        #     device=self.device,
-        #     is_main_process=self.is_main_process,
-        #     num_gpus=self.gpu_world_size,
-        # )
+        if self.config.use_symmetry:
+            self.symmetry_utils = SymmetryUtils(
+                self.env, self.config.symmetry_config, self.device
+            )
 
         if self.is_multi_gpu:
             self._synchronize_model_parameters(self.actor, self.qnet)
@@ -402,7 +394,7 @@ class FastSACAgent(BaseAlgo):
             actions, log_probs = actor.get_actions_and_log_probs(data["observations"])
             # For logging, this is a bit wasteful though, but could be useful
             with torch.no_grad():
-                _, log_std = actor(data["observations"])
+                _, _, log_std = actor(data["observations"])
                 action_std = log_std.exp().mean()
                 # Compute policy entropy (negative log probability)
                 policy_entropy = -log_probs.mean()
@@ -459,7 +451,6 @@ class FastSACAgent(BaseAlgo):
             augmented_large_data["observations"] = (
                 self.symmetry_utils.augment_observations(
                     obs=large_data["observations"],
-                    env=self.env,
                     obs_list=self.config.actor_obs_keys,
                 )
             )
@@ -470,21 +461,18 @@ class FastSACAgent(BaseAlgo):
             augmented_large_data["next"]["observations"] = (
                 self.symmetry_utils.augment_observations(
                     obs=large_data["next"]["observations"],
-                    env=self.env,
                     obs_list=self.config.actor_obs_keys,
                 )
             )
             augmented_large_data["critic_observations"] = (
                 self.symmetry_utils.augment_observations(
                     obs=large_data["critic_observations"],
-                    env=self.env,
                     obs_list=self.config.critic_obs_keys,
                 )
             )
             augmented_large_data["next"]["critic_observations"] = (
                 self.symmetry_utils.augment_observations(
                     obs=large_data["next"]["critic_observations"],
-                    env=self.env,
                     obs_list=self.config.critic_obs_keys,
                 )
             )
@@ -740,7 +728,9 @@ class FastSACAgent(BaseAlgo):
                         logger.info(f"Saving model at global step {self.global_step}")
                         self.save(
                             os.path.join(
-                                self.log_dir, f"model_{self.global_step:07d}.pt"
+                                self.log_dir,
+                                "models",
+                                f"model_{self.global_step}.pt",
                             )
                         )
 
@@ -755,7 +745,7 @@ class FastSACAgent(BaseAlgo):
 
         if self.is_main_process:
             self.save(
-                os.path.join(self.log_dir, "models", f"model_{self.global_step:06d}.pt")
+                os.path.join(self.log_dir, "models", f"model_{self.global_step}.pt")
             )
 
     def save(self, path: str) -> None:  # type: ignore[override]
@@ -818,12 +808,13 @@ class FastSACAgent(BaseAlgo):
         obs_normalizer.eval()
 
         def policy_fn(obs: dict[str, torch.Tensor]) -> torch.Tensor:
-            if self.obs_normalization:
+            if self.obs_normalizer:
                 normalized_obs = obs_normalizer(obs["policy"], update=False)
             else:
                 normalized_obs = obs["policy"]
             # Actions are already scaled by the actor
-            return policy(normalized_obs)[0]
+            action, _, _ = policy(normalized_obs)
+            return action
 
         return policy_fn
 
@@ -832,10 +823,34 @@ class FastSACAgent(BaseAlgo):
         obs_dict, _ = self.env.reset()
 
         for _ in itertools.islice(itertools.count(), max_eval_steps):
-            if self.obs_normalization:
+            if self.obs_normalizer:
                 normalized_obs = self.obs_normalizer(obs_dict["policy"], update=False)
             else:
                 normalized_obs = obs_dict["policy"]
             # Actions are already scaled by the actor
-            actions = self.actor(normalized_obs)[0]
+            actions, _, _ = self.actor(normalized_obs)
             obs_dict, _, _, _ = self.env.step(actions)
+
+    @property
+    def actor_onnx_wrapper(self):
+        # Use the underlying module for ONNX export
+        actor = copy.deepcopy(self.actor).to("cpu")
+        obs_normalizer = copy.deepcopy(self.obs_normalizer).to("cpu")
+        actor.action_scale = actor.action_scale.to("cpu")  # TODO: brutal?
+
+        class ActorWrapper(nn.Module):
+            def __init__(self, actor, obs_normalizer):
+                super().__init__()
+                self.actor = actor
+                self.obs_normalizer = obs_normalizer
+
+            def forward(self, actor_obs):
+                if self.obs_normalizer is not None:
+                    normalized_obs = self.obs_normalizer(actor_obs, update=False)
+                else:
+                    normalized_obs = actor_obs
+                # Actions are already scaled by the actor
+                action, _, _ = self.actor(normalized_obs)
+                return action
+
+        return ActorWrapper(actor, obs_normalizer if self.obs_normalizer else None)

@@ -5,6 +5,7 @@ from typing import Dict, List, Sequence
 import torch
 
 from holosoma_agent.configs.symmetry_config import SymmetryConfig
+from holosoma_agent.env.vec_env import VecEnv
 
 
 class SymmetryUtils:
@@ -17,10 +18,12 @@ class SymmetryUtils:
 
     def __init__(
         self,
+        env: VecEnv,
         cfg: SymmetryConfig,
         device: torch.device | str = None,
     ) -> None:
 
+        self.env = env
         self.device = device
         self.cfg = cfg
 
@@ -36,6 +39,7 @@ class SymmetryUtils:
             str, Dict[str, torch.Tensor]
         ] = {}  # Indices within single frame
         self.sub_observation_dims: Dict[str, int] = {}
+
         self.joint_index_map: torch.Tensor = torch.empty(0)
         self.sign_flip_mask: torch.Tensor = torch.empty(0)
 
@@ -47,10 +51,88 @@ class SymmetryUtils:
     """
 
     def _init_observation_config(self) -> None:
-        pass
+        term_cfgs = self.env.unwrapped.observation_manager.cfg.to_dict()
+        term_names: dict[str, list[str]] = (
+            self.env.unwrapped.observation_manager._group_obs_term_names
+        )
+        term_dims: dict[str, tuple[float]] = (
+            self.env.unwrapped.observation_manager._group_obs_term_dim
+        )
+
+        # initialization
+        self.observation_dims = {group_name: 0 for group_name in term_names.keys()}
+        self.observation_dims_single_frame = {
+            group_name: 0 for group_name in term_names.keys()
+        }
+        self.history_lengths = {group_name: 0 for group_name in term_names.keys()}
+        self.sub_observation_keys = {group_name: [] for group_name in term_names.keys()}
+        self.sub_observation_indices = {
+            group_name: {} for group_name in term_names.keys()
+        }
+        self.sub_observation_indices_single_frame = {
+            group_name: {} for group_name in term_names.keys()
+        }
+        self.sub_observation_dims = {group_name: {} for group_name in term_names.keys()}
+
+        # process
+        for group_name in term_names.keys():
+            if group_name in [
+                "policy",
+                "critic",
+            ]:  # TODO: grab obs, critic groups from config
+                history_length = term_cfgs[group_name]["history_length"]
+                for i, term_name in enumerate(term_names[group_name]):
+                    sub_obs_dim = term_dims[group_name][i][0]
+                    self.observation_dims[group_name] += sub_obs_dim * history_length
+                    self.observation_dims_single_frame[group_name] += sub_obs_dim
+                    self.history_lengths[group_name] = history_length
+
+                    self.sub_observation_keys[group_name].append(term_name)
+                    self.sub_observation_indices[group_name][term_name] = torch.arange(
+                        self.observation_dims[group_name]
+                        - sub_obs_dim * history_length,
+                        self.observation_dims[group_name],
+                    )
+                    self.sub_observation_indices_single_frame[group_name][term_name] = (
+                        torch.arange(
+                            self.observation_dims_single_frame[group_name]
+                            - sub_obs_dim,
+                            self.observation_dims_single_frame[group_name],
+                        )
+                    )
+                    self.sub_observation_dims[group_name][term_name] = sub_obs_dim
 
     def _init_joint_config(self) -> None:
-        pass
+        # grab from config
+        dof_names = self.cfg.joint_names
+        symmetry_joint_names = self.cfg.symmetry_joint_names
+        sign_flip_joints = self.cfg.sign_flip_joints
+
+        # create name to index mapping
+        name_to_idx = {name: idx for idx, name in enumerate(dof_names)}
+
+        # Build joint index mapping
+        joint_index_mapping = {}
+        for joint1, joint2 in symmetry_joint_names.items():
+            if joint1 in name_to_idx and joint2 in name_to_idx:
+                joint_index_mapping[name_to_idx[joint1]] = name_to_idx[joint2]
+
+        # Create joint mapping tensor
+        self.joint_index_map = torch.tensor(
+            [joint_index_mapping.get(i, i) for i in range(len(dof_names))],
+            device=self.env.device,
+            dtype=torch.long,
+        )
+
+        # Create sign flip mask
+        sign_flip_indices = {
+            name_to_idx[name] for name in sign_flip_joints if name in name_to_idx
+        }
+        self.sign_flip_mask = torch.tensor(
+            [-1.0 if i in sign_flip_indices else 1.0 for i in range(len(dof_names))],
+            device=self.env.device,
+            dtype=torch.float,
+        )
 
     """
     augmentation code
@@ -85,8 +167,9 @@ class SymmetryUtils:
             )
             for sub_key in self.sub_observation_keys[obs_key]:
                 sub_idx = self.sub_observation_indices_single_frame[obs_key][sub_key]
-                mirror_fn = getattr(self, f"mirror_obs_{sub_key}")
-                seg[..., sub_idx] = mirror_fn(seg[..., sub_idx])
+                if hasattr(self, f"mirror_obs_{sub_key}"):
+                    mirror_fn = getattr(self, f"mirror_obs_{sub_key}")
+                    seg[..., sub_idx] = mirror_fn(seg[..., sub_idx])
             mirrored[..., idx : idx + length] = seg.reshape(B, length)
             idx += length
         return mirrored
@@ -283,7 +366,7 @@ class SymmetryUtils:
         cos_phase[..., 0] = -cos_phase[..., 0]
         return cos_phase
 
-    def mirror_obs_dof_pos(self, dof_pos: torch.Tensor) -> torch.Tensor:
+    def mirror_obs_joint_pos(self, dof_pos: torch.Tensor) -> torch.Tensor:
         """Mirrors the joint positions using joint mapping and sign flipping.
 
         Parameters
@@ -301,7 +384,7 @@ class SymmetryUtils:
         """
         return dof_pos[..., self.joint_index_map] * self.sign_flip_mask
 
-    def mirror_obs_dof_vel(self, dof_vel: torch.Tensor) -> torch.Tensor:
+    def mirror_obs_joint_vel(self, dof_vel: torch.Tensor) -> torch.Tensor:
         """Mirrors the joint velocities (same mapping as joint positions).
 
         Parameters

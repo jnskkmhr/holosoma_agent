@@ -90,7 +90,9 @@ class Actor(nn.Module):
         nn.init.constant_(self.fc_log_std.weight, 0.0)
         nn.init.constant_(self.fc_log_std.bias, 0.0)
 
-    def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, obs: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = self.net(obs)
         mean = self.fc_mean(x)
         log_std = self.fc_log_std(x)
@@ -98,12 +100,19 @@ class Actor(nn.Module):
         log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (
             log_std + 1
         )
-        return mean, log_std
+
+        if self.use_tanh:
+            tanh_mean = torch.tanh(mean)
+            action = tanh_mean * self.action_scale
+        else:
+            action = mean
+
+        return action, mean, log_std
 
     def get_actions_and_log_probs(
         self, obs: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        mean, log_std = self(obs)
+        _, mean, log_std = self(obs)
         std = log_std.exp()
         dist = torch.distributions.Normal(mean, std)
         raw_action = dist.rsample()
@@ -136,7 +145,7 @@ class Actor(nn.Module):
         dones: torch.Tensor | None = None,
         deterministic: bool = False,
     ) -> torch.Tensor:
-        mean, log_std = self(obs)
+        _, mean, log_std = self(obs)
         if deterministic:
             if self.use_tanh:
                 tanh_mean = torch.tanh(mean)
