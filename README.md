@@ -10,8 +10,9 @@ uv pip install -e .
 - [x] FastSAC implementation 
 - [x] IsaacLab integration 
 - [x] Implement symmetry augmentation 
-- [] Config refactoring
-- [] PPO implementation 
-- [] CNN actor/critic
-- [] Refactoring 
-- [] Add documentation
+- [ ] Config refactoring
+- [ ] PPO implementation 
+- [ ] CNN actor/critic
+- [ ] Refactoring 
+- [ ] Add documentation
+- [ ] Multi-GPU training

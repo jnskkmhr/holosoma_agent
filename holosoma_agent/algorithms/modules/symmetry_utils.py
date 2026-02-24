@@ -248,6 +248,25 @@ class SymmetryUtils:
         projected_gravity[..., 1] = -projected_gravity[..., 1]  # Flip y component
         return projected_gravity
 
+    def mirror_obs_velocity_commands(
+        self, velocity_commands: torch.Tensor
+    ) -> torch.Tensor:
+        """Mirrors the commanded velocity.
+
+        Parameters
+        ----------
+        velocity_commands : torch.Tensor
+            Commanded linear and angular velocity with layout [v_x_cmd, v_y_cmd, ω_z_cmd].
+
+        Returns
+        -------
+        torch.Tensor
+            Mirrored commanded linear and angular velocity with sign negated: [v_x_cmd, -v_y_cmd, -ω_z_cmd].
+        """
+        velocity_commands[..., 1] = -velocity_commands[..., 1]
+        velocity_commands[..., 2] = -velocity_commands[..., 2]
+        return velocity_commands
+
     def mirror_obs_command_lin_vel(self, command_lin_vel: torch.Tensor) -> torch.Tensor:
         """Mirrors the commanded linear velocity.
 
@@ -365,6 +384,23 @@ class SymmetryUtils:
         """
         cos_phase[..., 0] = -cos_phase[..., 0]
         return cos_phase
+
+    def mirror_obs_clock(self, clock: torch.Tensor) -> torch.Tensor:
+        """Mirrors the phase for gait timing.
+
+        Parameters
+        ----------
+        clock : torch.Tensor
+            Cosine and sine of gait phase with layout [cos(φ), sin(φ), ...].
+
+        Returns
+        -------
+        torch.Tensor
+            Mirrored phase: [-cos(φ), -sin(φ), ...].
+        """
+        clock[..., 0] = -clock[..., 0]
+        clock[..., 1] = -clock[..., 1]
+        return clock
 
     def mirror_obs_joint_pos(self, dof_pos: torch.Tensor) -> torch.Tensor:
         """Mirrors the joint positions using joint mapping and sign flipping.
