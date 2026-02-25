@@ -110,6 +110,7 @@ class FastSACAgent(BaseAlgo):
             obs_dim=actor_obs_dim,
             action_dim=env.num_actions,
             hidden_dim=self.config.actor_hidden_dim,
+            use_tanh=self.config.use_tanh,
             use_layer_norm=self.config.use_layer_norm,
             log_std_max=self.config.log_std_max,
             log_std_min=self.config.log_std_min,
