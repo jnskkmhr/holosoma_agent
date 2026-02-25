@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, MISSING
-from typing import List
+from dataclasses import dataclass, MISSING
 
 
 @dataclass

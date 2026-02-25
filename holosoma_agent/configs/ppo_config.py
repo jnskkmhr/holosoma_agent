@@ -1,91 +1,143 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import List
+from dataclasses import dataclass, MISSING
 
 from .symmetry_config import SymmetryConfig
+
+
+class OptimizerConfig:
+    """Configuration for optimizer settings."""
+
+    _target_: str = MISSING
+    """Target optimizer class (e.g., torch.optim.AdamW)."""
+    weight_decay: float = MISSING
+    """Weight decay parameter for the optimizer."""
+
+
+class LayerConfig:
+    """Configuration for neural network layer settings."""
+
+    hidden_dims: list[int] = MISSING
+    """List of hidden layer dimensions."""
+    activation: str = MISSING
+    """Activation function name."""
+    dropout_prob: float = MISSING
+    """Dropout probability."""
+    use_layer_norm: bool = MISSING
+    """Whether to use layer normalization."""
+
+    encoder_activation: str = MISSING
+    """Activation function name for encoder layers."""
+    encoder_output_dim: int | None = MISSING
+    """Output dimension for encoder. Only used for encoder modules."""
+    encoder_hidden_dims: list[int] | None = MISSING
+    """Hidden dimensions for encoder. Only used for encoder modules."""
+    encoder_input_name: str = MISSING
+    """Input name for encoder. Only used for encoder modules."""
+    input_channels: int = MISSING
+    """Number of input channels. Only used for CNN modules."""
+    input_height: int = MISSING
+    """Height of input feature maps. Only used for CNN modules."""
+    input_width: int = MISSING
+    """Width of input feature maps. Only used for CNN modules."""
+    hidden_channels: tuple[int, ...] | None = MISSING
+    """Hidden channel dimensions. Only used for CNN modules."""
+    kernel_size: int | tuple[int, ...] = MISSING
+    """Kernel size for convolutions. Only used for CNN modules."""
+    stride: int | tuple[int, ...] = MISSING
+    """Stride for convolutions. Only used for CNN modules."""
+    padding: str | int | tuple[str | int, ...] = MISSING
+    """Padding mode for convolutions. Only used for CNN modules."""
+    module_input_name: tuple[str, ...] = MISSING
+    """Input names for module. Only used for encoder modules."""
+
+
+class ModuleConfig:
+    """Configuration for neural network modules."""
+
+    module_type: str = MISSING
+    """Module type (e.g., MLP)."""
+
+    input_dim: list[str] = MISSING
+    """Input dimension specification."""
+
+    output_dim: list[str | int] = MISSING
+    """Output dimension specification."""
+
+    layer_config: LayerConfig = MISSING
+    """Layer configuration settings."""
+
+    min_noise_std: float | None = MISSING
+    """Minimum noise standard deviation."""
+
+    min_mean_noise_std: float | None = MISSING
+    """Minimum mean noise standard deviation."""
+
+
+class PPOModuleDictConfig:
+    """Configuration for PPO module dictionary."""
+
+    actor: ModuleConfig = MISSING
+    """Actor module configuration."""
+
+    critic: ModuleConfig = MISSING
+    """Critic module configuration."""
 
 
 @dataclass
 class PPOConfig:
     """Configuration for the PPO algorithm."""
 
+    # ── Training loop ─────────────────────────────────────────────────────────
+    num_learning_iterations: int = MISSING
+    """Total number of training iterations (each = one rollout + update)."""
+    save_interval: int = MISSING
+    """Save a checkpoint every this many iterations."""
+    load_optimizer: bool = MISSING
+    """Whether to restore optimizer state when loading a checkpoint."""
+    init_at_random_ep_len: bool = MISSING
+    """Randomise the initial episode-length counter to de-correlate resets."""
+
     # ── Network architecture ──────────────────────────────────────────────────
-    actor_hidden_dims: List[int] = field(default_factory=lambda: [512, 256, 128])
-    """Hidden layer dims for the actor MLP."""
-
-    critic_hidden_dims: List[int] = field(default_factory=lambda: [512, 256, 128])
-    """Hidden layer dims for the critic MLP."""
-
-    activation: str = "ELU"
-    """Activation function (any ``torch.nn`` name, e.g. ``"ELU"``, ``"ReLU"``)."""
-
-    use_layer_norm: bool = False
-    """Whether to apply layer normalization inside the MLPs."""
-
-    init_noise_std: float = 0.8
+    module_dict: PPOModuleDictConfig = MISSING
+    init_noise_std: float = MISSING
     """Initial standard deviation of the actor's action distribution."""
 
     # ── PPO hyperparameters ───────────────────────────────────────────────────
-    num_steps_per_env: int = 24
+    num_steps_per_env: int = MISSING
     """Rollout length per environment before each update."""
-
-    num_learning_epochs: int = 8
+    num_learning_epochs: int = MISSING
     """Number of epochs over the collected rollout per update."""
-
-    num_mini_batches: int = 4
+    num_mini_batches: int = MISSING
     """Number of mini-batches per epoch."""
-
-    clip_param: float = 0.2
+    clip_param: float = MISSING
     """PPO clipping epsilon."""
-
-    gamma: float = 0.99
+    gamma: float = MISSING
     """Discount factor."""
-
-    lam: float = 0.95
+    lam: float = MISSING
     """GAE lambda."""
-
-    value_loss_coef: float = 1.0
+    value_loss_coef: float = MISSING
     """Weight of the value loss."""
-
-    entropy_coef: float = 0.01
+    entropy_coef: float = MISSING
     """Entropy bonus coefficient."""
-
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = MISSING
     """Gradient clipping max norm."""
 
     # ── Learning rate ─────────────────────────────────────────────────────────
-    actor_learning_rate: float = 1e-5
-    critic_learning_rate: float = 1e-5
-
-    schedule: str = "adaptive"
+    actor_learning_rate: float = MISSING
+    critic_learning_rate: float = MISSING
+    schedule: str = MISSING
     """LR schedule. ``"adaptive"`` adjusts based on KL, ``"fixed"`` keeps it constant."""
-
-    desired_kl: float = 0.01
+    desired_kl: float = MISSING
     """Target KL divergence for adaptive LR."""
-
-    max_actor_learning_rate: float | None = None
-    min_actor_learning_rate: float | None = None
-    max_critic_learning_rate: float | None = None
-    min_critic_learning_rate: float | None = None
+    max_actor_learning_rate: float | None = MISSING
+    min_actor_learning_rate: float | None = MISSING
+    max_critic_learning_rate: float | None = MISSING
+    min_critic_learning_rate: float | None = MISSING
 
     # ── Symmetry augmentation ─────────────────────────────────────────────────
-    use_symmetry: bool = False
+    use_symmetry: bool = MISSING
     """Whether to apply x-z plane symmetry augmentation during training."""
-    symmetry_config: SymmetryConfig | None = None
-
-    symmetry_actor_coef: float = 1.0
-    symmetry_critic_coef: float = 0.0
-
-    # ── Training loop ─────────────────────────────────────────────────────────
-    num_learning_iterations: int = 1_000_000
-    """Total number of training iterations (each = one rollout + update)."""
-
-    save_interval: int = 100
-    """Save a checkpoint every this many iterations."""
-
-    load_optimizer: bool = True
-    """Whether to restore optimizer state when loading a checkpoint."""
-
-    init_at_random_ep_len: bool = True
-    """Randomise the initial episode-length counter to de-correlate resets."""
+    symmetry_config: SymmetryConfig | None = MISSING
+    symmetry_actor_coef: float = MISSING
+    symmetry_critic_coef: float = MISSING
