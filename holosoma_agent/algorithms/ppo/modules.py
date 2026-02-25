@@ -1,68 +1,46 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field
-from typing import List
 
 import torch
 from torch import nn
 
-
-# ── Local config dataclasses (replaced holosoma.config_types.algo imports) ────
-
-
-@dataclass
-class LayerConfig:
-    """Configuration for a neural-network layer."""
-
-    hidden_dims: List[int] = field(default_factory=lambda: [512, 256, 128])
-    activation: str = "ELU"
-    dropout_prob: float = 0.0
-    use_layer_norm: bool = False
-
-    # Encoder-specific (MLPEncoder / CNNEncoder)
-    encoder_activation: str = "ELU"
-    encoder_output_dim: int | None = None
-    encoder_hidden_dims: List[int] | None = None
-    encoder_input_name: str = ""
-
-    # CNN-specific
-    input_channels: int = 1
-    input_height: int = 1
-    input_width: int = 1
-    hidden_channels: tuple[int, ...] | None = None
-    kernel_size: int | tuple[int, ...] = 3
-    stride: int | tuple[int, ...] = 1
-    padding: str | int | tuple = "same"
-
-    module_input_name: tuple[str, ...] = ()
-
-
-@dataclass
-class ModuleConfig:
-    """Configuration for a network module."""
-
-    type: str = "MLP"
-    input_dim: List[str] = field(default_factory=list)
-    output_dim: List[str | int] = field(default_factory=list)
-    layer_config: LayerConfig = field(default_factory=LayerConfig)
-    min_noise_std: float | None = None
-    min_mean_noise_std: float | None = None
-
-
-# ── Network builders ──────────────────────────────────────────────────────────
+from holosoma_agent.configs.ppo_config import LayerConfig, ModuleConfig
 
 
 class ImgChLayerNorm(nn.Module):
     """Image channel-wise layer normalization."""
 
     def __init__(self, num_channels, eps: float = 1e-5):
+        """Initialize ImgChLayerNorm module.
+
+        Parameters
+        ----------
+        num_channels: int
+            Number of channels in the input tensor
+        eps: float, optional
+            Small value to prevent division by zero, by default 1e-5
+        """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(num_channels))
         self.bias = nn.Parameter(torch.zeros(num_channels))
         self.eps = eps
 
     def forward(self, x):
+        """Forward pass for image channel-wise layer normalization.
+
+        Normalizes each channel of the input tensor independently.
+
+        Parameters
+        ----------
+        x: torch.Tensor
+            Input tensor of shape [B, C, H, W]
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor of shape [B, C, H, W]
+        """
         u = x.mean(1, keepdim=True)
         s = (x - u).pow(2).mean(1, keepdim=True)
         x = (x - u) / torch.sqrt(s + self.eps)
@@ -70,11 +48,29 @@ class ImgChLayerNorm(nn.Module):
 
 
 class CNNWrapper(nn.Module):
-    """Wrapper that reshapes flat inputs into (B, C, H, W) for CNN layers."""
+    """Wrapper module that handles reshaping for CNN layers when working with flattened inputs."""
 
     def __init__(
         self, cnn_layers, input_channels, input_height, input_width, flatten_output=True
     ):
+        """Initialize CNNWrapper module.
+
+        Wraps CNN layers to handle reshaping for CNN layers when working with flattened inputs.
+        For instance, this is useful when giving the flattened output of a CNN layer to an MLP layer.
+
+        Parameters
+        ----------
+        cnn_layers: nn.Module
+            CNN layers to wrap
+        input_channels: int
+            Number of input channels
+        input_height: int
+            Height of input feature maps
+        input_width: int
+            Width of input feature maps
+        flatten_output: bool, optional
+            Whether to flatten the output, by default True
+        """
         super().__init__()
         self.cnn_layers = cnn_layers
         self.input_channels = input_channels
@@ -85,48 +81,112 @@ class CNNWrapper(nn.Module):
 
     @property
     def output_size(self):
+        """Computes the output size of the CNN layers by doing a forward pass with dummy data."""
         with torch.no_grad():
-            dummy = torch.zeros(
+            dummy_input = torch.zeros(
                 1, self.input_channels * self.input_height * self.input_width
             )
-            return self.forward(dummy).shape[-1]
+            dummy_output = self.forward(dummy_input)
+            return dummy_output.shape[-1]
 
     def forward(self, x):
+        """Forward pass for CNNWrapper module.
+
+        Reshapes the input tensor to (batch_size, channels, height, width) and applies the CNN layers.
+        If flatten_output is True, flattens the output back to (batch_size, -1).
+
+        Parameters
+        ----------
+        x: torch.Tensor
+            Input tensor of shape [B, C, H, W]
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor of shape [B, -1] if flatten_output is True, otherwise [B, C, H, W]
+        """
+        # Validate input size
         batch_size = x.shape[0]
         if x.shape[1] != self.expected_input_size:
             raise ValueError(
-                f"Input size mismatch: expected {self.expected_input_size}, got {x.shape[1]}"
+                f"Input size mismatch: expected {self.expected_input_size} "
+                f"(channels={self.input_channels}, height={self.input_height}, width={self.input_width}), "
+                f"but got {x.shape[1]}"
             )
+
+        # Reshape from flattened input to (batch_size, channels, height, width)
         x = x.view(batch_size, self.input_channels, self.input_height, self.input_width)
+
+        # Apply CNN layers
         x = self.cnn_layers(x)
+
         if self.flatten_output:
+            # Flatten back to (batch_size, -1)
             x = x.view(batch_size, -1)
         else:
-            x = x.view(batch_size, x.shape[1], -1).permute(0, 2, 1)
+            # x is currently [batch_size, channels, height, width]
+            # Reshape to [batch_size, height * width, channels]
+            x = x.view(batch_size, x.shape[1], -1)
+            x = x.permute(0, 2, 1)
+
         return x
 
 
-def build_mlp_layer(input_dim, hidden_dims, output_dim, layer_config: LayerConfig):
+def build_mlp_layer(
+    input_dim,
+    hidden_dims,
+    output_dim,
+    layer_config,
+):
+    """Builds a multi-layer perceptron (MLP) layer.
+
+    Parameters
+    ----------
+    input_dim: int
+        Number of input dimensions
+    hidden_dims: tuple[int, ...]
+        Tuple of hidden dimensions
+    output_dim: int
+        Number of output dimensions
+    layer_config: dict
+        Dictionary containing:
+        - activation: Activation function name (e.g., "ReLU")
+        - dropout_prob: Dropout probability (default: 0)
+
+    Returns
+    -------
+    nn.Sequential
+        The constructed MLP layer
+    """
     if hidden_dims is None:
         return None
+
     layers = []
     activation = getattr(nn, layer_config.activation)()
     dropout = layer_config.dropout_prob
+
     if len(hidden_dims) == 0:
+        # No hidden layer, just one linear layer
         layers.append(nn.Linear(input_dim, output_dim))
     else:
+        # First hidden layer
         layers.append(nn.Linear(input_dim, hidden_dims[0]))
         layers.append(activation)
         if dropout > 0:
             layers.append(nn.Dropout(p=dropout))
-        for i in range(len(hidden_dims)):
-            if i == len(hidden_dims) - 1:
-                layers.append(nn.Linear(hidden_dims[i], output_dim))
+
+        # Additional hidden layers
+        for layer_idx in range(len(hidden_dims)):
+            if layer_idx == len(hidden_dims) - 1:
+                layers.append(nn.Linear(hidden_dims[layer_idx], output_dim))
             else:
-                layers.append(nn.Linear(hidden_dims[i], hidden_dims[i + 1]))
+                layers.append(
+                    nn.Linear(hidden_dims[layer_idx], hidden_dims[layer_idx + 1])
+                )
                 layers.append(activation)
                 if dropout > 0:
                     layers.append(nn.Dropout(p=dropout))
+
     return nn.Sequential(*layers)
 
 
@@ -135,163 +195,241 @@ def build_cnn_layer(
     input_height: int,
     input_width: int,
     hidden_channels: tuple[int, ...] | None,
-    kernel_size,
-    stride,
-    padding,
+    kernel_size: int | tuple[int, ...],
+    stride: int | tuple[int, ...],
+    padding: str | int | tuple[str | int, ...],
     layer_config: LayerConfig,
     flatten_output: bool = True,
 ):
-    if hidden_channels is None:
-        return None
-    assert len(hidden_channels) > 0
-    layers: list[nn.Module] = []
-    activation = getattr(nn, layer_config.encoder_activation)()
-    dropout = layer_config.dropout_prob
-    use_ln = layer_config.use_layer_norm
-    n = len(hidden_channels)
-
-    def _expand(v):
-        return (v,) * n if isinstance(v, (int, str)) else v
-
-    kernel_sizes = _expand(kernel_size)
-    strides = _expand(stride)
-    paddings = _expand(padding)
-
-    def _pad(p, k):
-        if p == "same":
-            return k // 2
-        if p == "valid":
-            return 0
-        return p
-
-    cur_in = input_channels
-    for i, out_ch in enumerate(hidden_channels):
-        layers.append(
-            nn.Conv2d(
-                cur_in,
-                out_ch,
-                kernel_size=kernel_sizes[i],
-                stride=strides[i],
-                padding=_pad(paddings[i], kernel_sizes[i]),
-            )
-        )
-        if i < n - 1:
-            if use_ln:
-                layers.append(ImgChLayerNorm(out_ch))
-            layers.append(activation)
-            if dropout > 0:
-                layers.append(nn.Dropout2d(p=dropout))
-        cur_in = out_ch
-    return CNNWrapper(
-        nn.Sequential(*layers),
-        input_channels,
-        input_height,
-        input_width,
-        flatten_output,
-    )
-
-
-# ── BaseModule ─────────────────────────────────────────────────────────────────
-
-
-class BaseModule(nn.Module):
-    """General-purpose network module (MLP / MLPEncoder / CNNEncoder).
+    """Builds a convolutional neural network layer that works with flattened inputs.
 
     Parameters
     ----------
-    obs_dim_dict : dict[str, int]
-        Flat dimension of each observation group (history already included).
-    module_config : ModuleConfig
-    history_length : dict[str, int]
-        History factor per observation group.
-    """
+        input_channels: int
+            Number of input channels
+        input_height: int
+            Height of input feature maps
+        input_width: int
+            Width of input feature maps
+        hidden_channels: tuple[int, ...]
+            Tuple of channel dimensions (last value becomes output channels)
+        kernel_size: int or tuple[int, ...]
+            Kernel size for convolutions (int or tuple for per-layer values)
+        stride: int or tuple[int, ...]
+            Stride for convolutions (int or tuple for per-layer values)
+        padding: str | int | tuple[str | int, ...]
+            Padding mode (int, "same", "valid", or tuple for per-layer values)
+        layer_config: dict
+            Dictionary containing:
+            - activation: Activation function name (e.g., "ReLU")
+            - dropout_prob: Dropout probability (default: 0)
+            - use_layer_norm: Whether to use layer normalization (default: False)
 
+    Returns
+    -------
+        CNNWrapper
+            The constructed CNN layer wrapped to handle flattened inputs/outputs
+    """
+    if hidden_channels is None:
+        return None
+    assert len(hidden_channels) > 0, "hidden_channels must be a non-empty tuple"
+
+    layers: list[nn.Module] = []
+    activation = getattr(nn, layer_config.encoder_activation)()
+    dropout = layer_config.dropout_prob
+    use_layer_norm = layer_config.use_layer_norm
+
+    num_layers = len(hidden_channels)
+    # Convert single values to tuples if needed
+    if isinstance(kernel_size, int):
+        kernel_sizes = (kernel_size,) * num_layers
+    else:
+        kernel_sizes = kernel_size
+        if len(kernel_sizes) != num_layers:
+            raise ValueError(
+                f"kernel_size tuple length ({len(kernel_sizes)}) must match number of layers ({num_layers})"
+            )
+
+    if isinstance(stride, int):
+        strides = (stride,) * num_layers
+    else:
+        strides = stride
+        if len(strides) != num_layers:
+            raise ValueError(
+                f"stride tuple length ({len(strides)}) must match number of layers ({num_layers})"
+            )
+
+    if isinstance(padding, (str, int)):
+        paddings = (padding,) * num_layers
+    else:
+        paddings = padding
+        if len(paddings) != num_layers:
+            raise ValueError(
+                f"padding tuple length ({len(paddings)}) must match number of layers ({num_layers})"
+            )
+
+    # Helper function to get padding value
+    def get_padding_value(padding_spec, kernel_size_val):
+        if padding_spec == "same":
+            return kernel_size_val // 2
+        if padding_spec == "valid":
+            return 0
+        return padding_spec
+
+    # Build layers
+    current_in_channels = input_channels
+    for layer_idx in range(num_layers):
+        current_out_channels = hidden_channels[layer_idx]
+        current_kernel_size = kernel_sizes[layer_idx]
+        current_stride = strides[layer_idx]
+        current_padding = get_padding_value(paddings[layer_idx], current_kernel_size)
+
+        # Add convolution layer
+        layers.append(
+            nn.Conv2d(
+                current_in_channels,
+                current_out_channels,
+                kernel_size=current_kernel_size,
+                stride=current_stride,
+                padding=current_padding,
+            )
+        )
+
+        # Add layer norm, activation and dropout for all layers except the last one
+        if layer_idx < num_layers - 1:
+            if use_layer_norm:
+                layers.append(ImgChLayerNorm(current_out_channels))
+            layers.append(activation)
+            if dropout > 0:
+                layers.append(nn.Dropout2d(p=dropout))
+
+        current_in_channels = current_out_channels
+
+    cnn_sequential = nn.Sequential(*layers)
+
+    # Wrap with CNNWrapper to handle flattened inputs/outputs
+    return CNNWrapper(
+        cnn_sequential, input_channels, input_height, input_width, flatten_output
+    )
+
+
+class BaseModule(nn.Module):
     def __init__(
-        self,
-        obs_dim_dict: dict[str, int],
-        module_config: ModuleConfig,
-        history_length: dict[str, int],
+        self, obs_dim_dict, module_config_dict, history_length: dict[str, int]
     ):
         super().__init__()
         self.obs_dim_dict = obs_dim_dict
-        self.module_config_dict = module_config
+        self.module_config_dict = module_config_dict
         self.history_length = history_length
         self._calculate_input_dim()
         self._calculate_output_dim()
-        self._build_network_layer(module_config)
+        self._build_network_layer(self.module_config_dict)
 
     def _calculate_input_dim(self):
+        # calculate input dimension and input slices
         self.input_dim = 0
-        self.input_dim_dict: dict = {}
-        self.input_indices_dict: dict = {}
-        cur = 0
-        for each in self.module_config_dict.input_dim:
-            if each in self.obs_dim_dict:
-                dim = self.obs_dim_dict[each]
-                self.input_dim += dim
-                self.input_dim_dict[each] = dim
-                self.input_indices_dict[each] = slice(cur, cur + dim)
-                cur += dim
-            elif isinstance(each, (int, float)):
-                dim = int(each)
-                self.input_dim += dim
-                self.input_dim_dict[each] = dim
-                self.input_indices_dict[each] = slice(cur, cur + dim)
-                cur += dim
+        self.input_dim_dict = {}
+        self.input_indices_dict = {}
+
+        current_index = 0
+        for each_input in self.module_config_dict.input_dim:
+            if each_input in self.obs_dim_dict:
+                # atomic observation type
+                # Note: obs_dim_dict already includes history, so we don't multiply by history_length
+                input_dim = self.obs_dim_dict[each_input]
+                self.input_dim += input_dim
+                self.input_dim_dict[each_input] = input_dim
+                self.input_indices_dict[each_input] = slice(
+                    current_index, current_index + input_dim
+                )
+                current_index += input_dim
+
+            elif isinstance(each_input, (int, float)):
+                # direct numeric input
+                input_dim = int(each_input)
+                self.input_dim += input_dim
+                self.input_dim_dict[each_input] = input_dim
+                self.input_indices_dict[each_input] = slice(
+                    current_index, current_index + input_dim
+                )
+                current_index += input_dim
+
             else:
-                fn = inspect.currentframe().f_code.co_name
-                raise ValueError(f"{fn} - Unknown input type: {each}")
+                current_function_name = inspect.currentframe().f_code.co_name
+                raise ValueError(
+                    f"{current_function_name} - Unknown input type: {each_input}"
+                )
 
     def _calculate_output_dim(self):
+        # calculate output dimension based on the output specifications
         self.output_dim = 0
-        for each in self.module_config_dict.output_dim:
-            if isinstance(each, (int, float)):
-                self.output_dim += int(each)
+        for each_output in self.module_config_dict.output_dim:
+            if isinstance(each_output, (int, float)):
+                self.output_dim += each_output
             else:
-                fn = inspect.currentframe().f_code.co_name
-                raise ValueError(f"{fn} - Unknown output type: {each}")
+                current_function_name = inspect.currentframe().f_code.co_name
+                raise ValueError(
+                    f"{current_function_name} - Unknown output type: {each_output}"
+                )
 
-    def _build_network_layer(self, cfg: ModuleConfig):
-        ltype = cfg.type
-        lc = cfg.layer_config
-        if ltype == "MLP":
+    def _build_network_layer(self, module_config: ModuleConfig):
+        layer_type = module_config.module_type
+        layer_config = module_config.layer_config
+        if layer_type == "MLP":
             self.module = build_mlp_layer(
-                self.input_dim, lc.hidden_dims, self.output_dim, lc
+                self.input_dim,
+                layer_config.hidden_dims,
+                self.output_dim,
+                layer_config,
             )
-        elif ltype == "CNNEncoder":
+        elif layer_type == "CNNEncoder":
             self.encoder = build_cnn_layer(
-                lc.input_channels,
-                lc.input_height,
-                lc.input_width,
-                lc.hidden_channels,
-                lc.kernel_size,
-                lc.stride,
-                lc.padding,
-                lc,
+                layer_config.input_channels,
+                layer_config.input_height,
+                layer_config.input_width,
+                layer_config.hidden_channels,
+                layer_config.kernel_size,
+                layer_config.stride,
+                layer_config.padding,
+                layer_config,
+                flatten_output=True,
             )
-            enc_out = self.encoder.output_size
-            mlp_in = sum(self.input_dim_dict[k] for k in lc.module_input_name)
+            encoder_output_dim = self.encoder.output_size
+            mlp_input_dim = sum(
+                self.input_dim_dict[each_input]
+                for each_input in layer_config.module_input_name
+            )
             self.module = build_mlp_layer(
-                mlp_in + enc_out, lc.hidden_dims, self.output_dim, lc
+                mlp_input_dim + encoder_output_dim,
+                layer_config.hidden_dims,
+                self.output_dim,
+                layer_config,
             )
-        elif ltype == "MLPEncoder":
-            enc_out = (
-                lc.encoder_output_dim
-                if lc.encoder_hidden_dims is not None
-                else self.input_dim_dict[lc.encoder_input_name]
+        elif layer_type == "MLPEncoder":
+            encoder_output_dim = (
+                layer_config.encoder_output_dim
+                if layer_config.encoder_hidden_dims is not None
+                else self.input_dim_dict[layer_config.encoder_input_name]
             )
             self.encoder = build_mlp_layer(
-                self.input_dim_dict[lc.encoder_input_name],
-                lc.encoder_hidden_dims,
-                enc_out,
-                lc,
+                self.input_dim_dict[layer_config.encoder_input_name],
+                layer_config.encoder_hidden_dims,
+                encoder_output_dim,
+                layer_config,
             )
-            mlp_in = sum(self.input_dim_dict[k] for k in lc.module_input_name)
+            mlp_input_dim = sum(
+                self.input_dim_dict[each_input]
+                for each_input in layer_config.module_input_name
+            )
             self.module = build_mlp_layer(
-                mlp_in + enc_out, lc.hidden_dims, self.output_dim, lc
+                mlp_input_dim + encoder_output_dim,
+                layer_config.hidden_dims,
+                self.output_dim,
+                layer_config,
             )
         else:
-            raise NotImplementedError(f"Unsupported layer type: {ltype}")
+            raise NotImplementedError(f"Unsupported layer type: {layer_type}")
 
     def forward(self, policy_input):
+        # Only forward the MLP layer
         return self.module(policy_input)

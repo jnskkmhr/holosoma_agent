@@ -28,7 +28,7 @@ from holosoma_agent.algorithms.fast_sac.fast_sac_utils import (
     SimpleReplayBuffer,
     save_params,
 )
-from holosoma_agent.algorithms.modules.symmetry_utils import SymmetryUtils
+from holosoma_agent.utils.symmetry_utils import SymmetryUtils
 from holosoma_agent.utils.logger import Logger
 from holosoma_agent.configs.fast_sac_config import FastSACConfig
 from holosoma_agent.env.fast_sac_env import FastSACVecEnv
@@ -198,7 +198,6 @@ class FastSACAgent(BaseAlgo):
         self.scaler = GradScaler(enabled=self.config.amp)
 
         # Logging
-        # TODO: replace with rsl_rl style logger
         self.logger = Logger(
             log_dir=str(self.log_dir),
             cfg=self.config.to_dict(),

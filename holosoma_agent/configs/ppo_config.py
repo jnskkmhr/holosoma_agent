@@ -123,9 +123,11 @@ class PPOConfig:
     max_grad_norm: float = MISSING
     """Gradient clipping max norm."""
 
-    # ── Learning rate ─────────────────────────────────────────────────────────
+    # ── optimizer ─────────────────────────────────────────────────────────
     actor_learning_rate: float = MISSING
+    actor_optimizer: OptimizerConfig = MISSING
     critic_learning_rate: float = MISSING
+    critic_optimizer: OptimizerConfig = MISSING
     schedule: str = MISSING
     """LR schedule. ``"adaptive"`` adjusts based on KL, ``"fixed"`` keeps it constant."""
     desired_kl: float = MISSING
