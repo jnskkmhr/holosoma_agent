@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import time
-from typing import TypedDict
 
 import torch
 import torch.nn as nn
@@ -15,86 +15,11 @@ from holosoma_agent.algorithms.ppo.ppo_modules import (
     setup_ppo_actor_module,
     setup_ppo_critic_module,
 )
-
 from holosoma_agent.utils.symmetry_utils import SymmetryUtils
 from holosoma_agent.utils.logger import Logger
-from holosoma_agent.algorithms.ppo.data_utils import RolloutStorage
+from holosoma_agent.algorithms.ppo.data_utils import RolloutStorage, Minibatch
 from holosoma_agent.configs.ppo_config import PPOConfig
 from holosoma_agent.env.vec_env import VecEnv
-
-
-class Minibatch(TypedDict):
-    """A minibatch of data for training a PPO agent."""
-
-    actor_obs: torch.Tensor
-    """The observation of the actor.
-
-    Shape: (mini_batch_size, actor_obs_dim), dtype: torch.float32
-    """
-
-    critic_obs: torch.Tensor
-    """The observation of the critic.
-
-    Shape: (mini_batch_size, critic_obs_dim), dtype: torch.float32
-    """
-
-    actions: torch.Tensor
-    """The actions taken by the agent.
-
-    Shape: (mini_batch_size, num_act), dtype: torch.float32
-    """
-
-    rewards: torch.Tensor
-    """The rewards received from the environment.
-
-    Shape: (mini_batch_size, 1), dtype: torch.float32
-    """
-
-    dones: torch.Tensor
-    """Whether each episode is done after taking the action.
-
-    Shape: (mini_batch_size, 1), dtype: torch.bool
-    """
-
-    values: torch.Tensor
-    """The value estimates from the critic.
-
-    Shape: (mini_batch_size, 1), dtype: torch.float32
-    """
-
-    returns: torch.Tensor
-    """The computed (unnormalized) returns for each step.
-
-    The returns are computed following Generalized Advantage Estimation (GAE).
-
-    Shape: (mini_batch_size, 1), dtype: torch.float32
-    """
-
-    advantages: torch.Tensor
-    """The computed (normalized) advantages for each step.
-
-    The advantages are computed following Generalized Advantage Estimation (GAE).
-
-    Shape: (mini_batch_size, 1), dtype: torch.float32
-    """
-
-    actions_log_prob: torch.Tensor
-    """The log probabilities of the actions.
-
-    Shape: (mini_batch_size, 1), dtype: torch.float32
-    """
-
-    action_mean: torch.Tensor
-    """The mean of the action distribution (assuming Gaussian distribution).
-
-    Shape: (mini_batch_size, num_act), dtype: torch.float32
-    """
-
-    action_sigma: torch.Tensor
-    """The standard deviation of the action distribution (assuming Gaussian distribution).
-
-    Shape: (mini_batch_size, num_act), dtype: torch.float32
-    """
 
 
 class PPO(BaseAlgo):
@@ -104,8 +29,8 @@ class PPO(BaseAlgo):
         self,
         env: VecEnv,
         config: PPOConfig,
-        log_dir,
-        device="cpu",
+        log_dir: str | pathlib.Path,
+        device: torch.device | str = "cpu",
         multi_gpu_cfg: dict | None = None,
     ):
         super().__init__(env, config, device, multi_gpu_cfg)
@@ -202,7 +127,9 @@ class PPO(BaseAlgo):
         )
 
         if self.config.use_symmetry:
-            self.symmetry_utils = SymmetryUtils(self.env)
+            self.symmetry_utils = SymmetryUtils(
+                self.env, self.config.symmetry_config, self.device
+            )
 
         # Synchronize model weights across GPUs after initialization
         if self.is_multi_gpu:
@@ -211,7 +138,7 @@ class PPO(BaseAlgo):
         self.actor_optimizer = torch.optim.AdamW(
             list(self.actor.parameters()),
             lr=self.actor_learning_rate,
-            weight_decay=self.config.actor_optimizer.weight_decay,
+            weight_decay=self.config.actor_optimizer_weight_decay,
             fused=True,
             betas=(0.9, 0.95),
         )
@@ -219,7 +146,7 @@ class PPO(BaseAlgo):
         self.critic_optimizer = torch.optim.AdamW(
             list(self.critic.parameters()),
             lr=self.critic_learning_rate,
-            weight_decay=self.config.critic_optimizer.weight_decay,
+            weight_decay=self.config.critic_optimizer_weight_decay,
             fused=True,
             betas=(0.9, 0.95),
         )
@@ -352,7 +279,7 @@ class PPO(BaseAlgo):
                 actions = self.actor.act(actor_obs)
                 values = self.critic.evaluate(critic_obs).detach()
 
-                obs_dict, rewards, dones, infos = self.env.step({"actions": actions})
+                obs_dict, rewards, dones, infos = self.env.step(actions)
 
                 # for obs_key in obs_dict:
                 #     obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
@@ -366,7 +293,7 @@ class PPO(BaseAlgo):
                         dim=1,
                     )
                     final_values = self.critic.evaluate(
-                        {"critic_obs": final_critic_obs}
+                        {"critic": final_critic_obs}
                     ).detach()
                     final_rewards += self.config.gamma * torch.squeeze(
                         final_values * infos["time_outs"].unsqueeze(1).to(self.device),
@@ -395,8 +322,8 @@ class PPO(BaseAlgo):
                 else:
                     # Add transition to storage
                     self.storage.add(
-                        actor_obs=actor_obs,
-                        critic_obs=critic_obs,
+                        actor_obs=actor_obs["policy"],
+                        critic_obs=critic_obs["critic"],
                         actions=actions,
                         values=values,
                         actions_log_prob=self.actor.get_actions_log_prob(actions)
@@ -416,7 +343,7 @@ class PPO(BaseAlgo):
                 [obs_dict[k] for k in self.critic_obs_keys], dim=1
             )
             last_values = (
-                self.critic.evaluate({"critic_obs": last_critic_obs})
+                self.critic.evaluate({"critic": last_critic_obs})
                 .detach()
                 .to(self.device)
             )
@@ -533,12 +460,10 @@ class PPO(BaseAlgo):
         if self.config.use_symmetry:
             actor_obs = self.symmetry_utils.augment_observations(
                 obs=minibatch["actor_obs"],
-                env=self.env,
                 obs_list=self.actor_obs_keys,
             )
             critic_obs = self.symmetry_utils.augment_observations(
                 obs=minibatch["critic_obs"],
-                env=self.env,
                 obs_list=self.critic_obs_keys,
             )
             actions_batch = self.symmetry_utils.augment_actions(

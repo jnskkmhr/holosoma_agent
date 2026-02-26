@@ -54,7 +54,7 @@ class FastSACAgent(BaseAlgo):
         self,
         env: FastSACVecEnv,
         config: FastSACConfig,
-        device: str,
+        device: str | torch.device = "cpu",
         log_dir: str | pathlib.Path = "./logs",
         multi_gpu_cfg: dict | None = None,
     ):

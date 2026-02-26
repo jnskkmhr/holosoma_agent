@@ -7,16 +7,6 @@ from .symmetry_config import SymmetryConfig
 
 
 @dataclass
-class OptimizerConfig:
-    """Configuration for optimizer settings."""
-
-    _target_: str = MISSING  # not used
-    """Target optimizer class (e.g., torch.optim.AdamW)."""
-    weight_decay: float = MISSING
-    """Weight decay parameter for the optimizer."""
-
-
-@dataclass
 class LayerConfig:
     """Configuration for neural network layer settings."""
 
@@ -98,6 +88,8 @@ class PPOConfig:
     """Total number of training iterations (each = one rollout + update)."""
     save_interval: int = MISSING
     """Save a checkpoint every this many iterations."""
+    logging_interval: int = MISSING
+    """Log training metrics every this many iterations."""
     load_optimizer: bool = MISSING
     """Whether to restore optimizer state when loading a checkpoint."""
     init_at_random_ep_len: bool = MISSING
@@ -130,9 +122,9 @@ class PPOConfig:
 
     # ── optimizer ─────────────────────────────────────────────────────────
     actor_learning_rate: float = MISSING
-    actor_optimizer: OptimizerConfig = MISSING
+    actor_optimizer_weight_decay: float = MISSING
     critic_learning_rate: float = MISSING
-    critic_optimizer: OptimizerConfig = MISSING
+    critic_optimizer_weight_decay: float = MISSING
     schedule: str = MISSING
     """LR schedule. ``"adaptive"`` adjusts based on KL, ``"fixed"`` keeps it constant."""
     desired_kl: float = MISSING
