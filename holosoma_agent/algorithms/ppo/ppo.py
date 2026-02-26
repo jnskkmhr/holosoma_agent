@@ -283,19 +283,18 @@ class PPO(BaseAlgo):
 
                 obs_dict, rewards, dones, infos = self.env.step(actions)
 
-                # for obs_key in obs_dict:
-                #     obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
-                # rewards, dones = rewards.to(self.device), dones.to(self.device)
-
                 # Compute bootstrap value for timeouts
                 final_rewards = torch.zeros_like(rewards)
                 if infos["time_outs"].any():
-                    final_critic_obs = torch.cat(
-                        [infos["final_observations"][k] for k in self.critic_obs_keys],
-                        dim=1,
-                    )
+                    # final_critic_obs = torch.cat(
+                    #     [infos["final_observations"][k] for k in self.critic_obs_keys],
+                    #     dim=1,
+                    # )
+                    # final_values = self.critic.evaluate(
+                    #     {"critic": final_critic_obs}
+                    # ).detach()
                     final_values = self.critic.evaluate(
-                        {"critic": final_critic_obs}
+                        {"critic": obs_dict["critic"]}
                     ).detach()
                     final_rewards += self.config.gamma * torch.squeeze(
                         final_values * infos["time_outs"].unsqueeze(1).to(self.device),
