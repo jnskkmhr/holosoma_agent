@@ -75,6 +75,7 @@ class FastSACAgent(BaseAlgo):
         logger.info("Setting up FastSACAgent")
         env = self.env
 
+        # I think this is smarter than defining everything in config like holosoma
         obs_space = env.observation_space  # gymnasium.spaces.dict.Dict
         actor_obs_space_shape = [
             obs_space[k].shape[-1] for k in self.config.actor_obs_keys

@@ -133,10 +133,10 @@ class CNNWrapper(nn.Module):
 
 
 def build_mlp_layer(
-    input_dim,
-    hidden_dims,
-    output_dim,
-    layer_config,
+    input_dim: int,
+    hidden_dims: tuple[int, ...],
+    output_dim: int,
+    layer_config: LayerConfig,
 ):
     """Builds a multi-layer perceptron (MLP) layer.
 
@@ -315,78 +315,48 @@ def build_cnn_layer(
 
 class BaseModule(nn.Module):
     def __init__(
-        self, obs_dim_dict, module_config_dict, history_length: dict[str, int]
+        self,
+        obs_dim_dict: dict[str, int | tuple[int, ...]],
+        output_dim: int,
+        module_config_dict: ModuleConfig,
     ):
+        """
+        Initialize the BaseModule.
+
+        Parameters
+        ----------
+        obs_dim_dict : dict[str, int | tuple[int, ...]]
+            Dictionary containing observation dimensions for different types of observations.
+            For example, {"mlp": 128, "cnn_encoder": (3, 64, 64)}
+        output_dim : int
+            Dimension of the output.
+        module_config_dict : ModuleConfig
+            Configuration for the module.
+        """
         super().__init__()
         self.obs_dim_dict = obs_dim_dict
-        self.module_config_dict = module_config_dict
-        self.history_length = history_length
-        self._calculate_input_dim()
-        self._calculate_output_dim()
-        self._build_network_layer(self.module_config_dict)
-
-    def _calculate_input_dim(self):
-        # calculate input dimension and input slices
-        self.input_dim = 0
-        self.input_dim_dict = {}
-        self.input_indices_dict = {}
-
-        current_index = 0
-        for each_input in self.module_config_dict.input_dim:
-            if each_input in self.obs_dim_dict:
-                # atomic observation type
-                # Note: obs_dim_dict already includes history, so we don't multiply by history_length
-                input_dim = self.obs_dim_dict[each_input]
-                self.input_dim += input_dim
-                self.input_dim_dict[each_input] = input_dim
-                self.input_indices_dict[each_input] = slice(
-                    current_index, current_index + input_dim
-                )
-                current_index += input_dim
-
-            elif isinstance(each_input, (int, float)):
-                # direct numeric input
-                input_dim = int(each_input)
-                self.input_dim += input_dim
-                self.input_dim_dict[each_input] = input_dim
-                self.input_indices_dict[each_input] = slice(
-                    current_index, current_index + input_dim
-                )
-                current_index += input_dim
-
-            else:
-                current_function_name = inspect.currentframe().f_code.co_name
-                raise ValueError(
-                    f"{current_function_name} - Unknown input type: {each_input}"
-                )
-
-    def _calculate_output_dim(self):
-        # calculate output dimension based on the output specifications
-        self.output_dim = 0
-        for each_output in self.module_config_dict.output_dim:
-            if isinstance(each_output, (int, float)):
-                self.output_dim += each_output
-            else:
-                current_function_name = inspect.currentframe().f_code.co_name
-                raise ValueError(
-                    f"{current_function_name} - Unknown output type: {each_output}"
-                )
+        self.output_dim = output_dim
+        self._build_network_layer(module_config_dict)
 
     def _build_network_layer(self, module_config: ModuleConfig):
         layer_type = module_config.module_type
         layer_config = module_config.layer_config
         if layer_type == "MLP":
+            mlp_obs_dim = self.obs_dim_dict["mlp"]
             self.module = build_mlp_layer(
-                self.input_dim,
+                mlp_obs_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
             )
         elif layer_type == "CNNEncoder":
+            # (channel, height, width)
+            cnn_encoder_obs_dim = self.obs_dim_dict["encoder"]
+            mlp_obs_dim = self.obs_dim_dict["mlp"]
             self.encoder = build_cnn_layer(
-                layer_config.input_channels,
-                layer_config.input_height,
-                layer_config.input_width,
+                cnn_encoder_obs_dim[0],
+                cnn_encoder_obs_dim[1],
+                cnn_encoder_obs_dim[2],
                 layer_config.hidden_channels,
                 layer_config.kernel_size,
                 layer_config.stride,
@@ -395,34 +365,27 @@ class BaseModule(nn.Module):
                 flatten_output=True,
             )
             encoder_output_dim = self.encoder.output_size
-            mlp_input_dim = sum(
-                self.input_dim_dict[each_input]
-                for each_input in layer_config.module_input_name
-            )
             self.module = build_mlp_layer(
-                mlp_input_dim + encoder_output_dim,
+                mlp_obs_dim + encoder_output_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
             )
         elif layer_type == "MLPEncoder":
-            encoder_output_dim = (
-                layer_config.encoder_output_dim
-                if layer_config.encoder_hidden_dims is not None
-                else self.input_dim_dict[layer_config.encoder_input_name]
+            mlp_encoder_obs_dim = self.obs_dim_dict["encoder"]
+            mlp_obs_dim = self.obs_dim_dict["mlp"]
+            assert layer_config.encoder_output_dim is not None, (
+                "encoder_output_dim must be specified for MLPEncoder"
             )
+            encoder_output_dim = layer_config.encoder_output_dim
             self.encoder = build_mlp_layer(
-                self.input_dim_dict[layer_config.encoder_input_name],
+                mlp_encoder_obs_dim,
                 layer_config.encoder_hidden_dims,
                 encoder_output_dim,
                 layer_config,
             )
-            mlp_input_dim = sum(
-                self.input_dim_dict[each_input]
-                for each_input in layer_config.module_input_name
-            )
             self.module = build_mlp_layer(
-                mlp_input_dim + encoder_output_dim,
+                mlp_obs_dim + encoder_output_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
@@ -430,6 +393,6 @@ class BaseModule(nn.Module):
         else:
             raise NotImplementedError(f"Unsupported layer type: {layer_type}")
 
-    def forward(self, policy_input):
+    def forward(self, policy_input: torch.Tensor):
         # Only forward the MLP layer
         return self.module(policy_input)

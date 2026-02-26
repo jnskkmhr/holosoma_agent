@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import TypedDict
 
 import torch
@@ -121,24 +122,31 @@ class PPO(BaseAlgo):
         )
 
         self._init_config()
-
         self.current_learning_iteration = 0
 
     def _init_config(self) -> None:
-        self.algo_obs_dim_dict = self.env.observation_manager.get_obs_dims()
+        self.actor_obs_keys = self.config.module_dict.actor.obs_keys
+        self.critic_obs_keys = self.config.module_dict.critic.obs_keys
 
-        # Observation manager system - history is defined per-module in module_dict
-        assert self.env.observation_manager is not None
-        self.algo_history_length_dict = {
-            "actor_obs": self.env.observation_manager.cfg.groups[
-                "actor_obs"
-            ].history_length,
-            "critic_obs": self.env.observation_manager.cfg.groups[
-                "critic_obs"
-            ].history_length,
-        }
+        # grab observation dimensions from gym obs space
+        obs_space = self.env.observation_space  # gymnasium.spaces.dict.Dict
+        self.actor_obs_dim_dict = {}
+        for key in self.actor_obs_keys:
+            if len(obs_space[key].shape) > 2:
+                # exclude batch dimension
+                self.actor_obs_dim_dict[key] = obs_space[key].shape[1:]
+            else:
+                self.actor_obs_dim_dict[key] = obs_space[key].shape[-1]
 
-        self.num_act = self.env.robot_config.actions_dim
+        self.critic_obs_dim_dict = {}
+        for key in self.critic_obs_keys:
+            if len(obs_space[key].shape) > 2:
+                # exclude batch dimension
+                self.critic_obs_dim_dict[key] = obs_space[key].shape[1:]
+            else:
+                self.critic_obs_dim_dict[key] = obs_space[key].shape[-1]
+
+        self.num_actions = self.env.num_actions
 
         self.actor_learning_rate = self.config.actor_learning_rate
         self.max_actor_learning_rate = self.config.max_actor_learning_rate or max(
@@ -155,14 +163,6 @@ class PPO(BaseAlgo):
             self.critic_learning_rate, 1e-5
         )
 
-        # Observation related Config
-        self.use_symmetry = self.config.use_symmetry
-        self._init_obs_keys()
-
-    def _init_obs_keys(self):
-        self.actor_obs_keys = self.config.module_dict.actor.input_dim
-        self.critic_obs_keys = self.config.module_dict.critic.input_dim
-
     def setup(self):
         logger.info("Setting up PPO")
         self._setup_models_and_optimizer()
@@ -177,22 +177,31 @@ class PPO(BaseAlgo):
                 )
 
     def _setup_models_and_optimizer(self):
+        # TODO: manual mapping is bit messy?
+        actor_obs_dim_dict = {}
+        if "policy" in self.actor_obs_dim_dict:
+            actor_obs_dim_dict["mlp"] = self.actor_obs_dim_dict["policy"]
+        if "policy_encoder" in self.actor_obs_dim_dict:
+            actor_obs_dim_dict["encoder"] = self.actor_obs_dim_dict["policy_encoder"]
         self.actor = setup_ppo_actor_module(
-            obs_dim_dict=self.algo_obs_dim_dict,
+            obs_dim_dict=actor_obs_dim_dict,
             module_config=self.config.module_dict.actor,
-            num_actions=self.num_act,
+            num_actions=self.num_actions,
             init_noise_std=self.config.init_noise_std,
             device=self.device,
-            history_length=self.algo_history_length_dict,
         )
+        critic_obs_dim_dict = {}
+        if "critic" in self.critic_obs_dim_dict:
+            critic_obs_dim_dict["mlp"] = self.critic_obs_dim_dict["critic"]
+        if "critic_encoder" in self.critic_obs_dim_dict:
+            critic_obs_dim_dict["encoder"] = self.critic_obs_dim_dict["critic_encoder"]
         self.critic = setup_ppo_critic_module(
-            obs_dim_dict=self.algo_obs_dim_dict,
+            obs_dim_dict=critic_obs_dim_dict,
             module_config=self.config.module_dict.critic,
             device=self.device,
-            history_length=self.algo_history_length_dict,
         )
 
-        if self.use_symmetry:
+        if self.config.use_symmetry:
             self.symmetry_utils = SymmetryUtils(self.env)
 
         # Synchronize model weights across GPUs after initialization
@@ -215,50 +224,41 @@ class PPO(BaseAlgo):
             betas=(0.9, 0.95),
         )
 
-    def _get_obs_dim(self, obs_keys: list[str]) -> int:
-        """Compute total observation dimension for given observation keys."""
-        obs_dim = 0
-        for obs_key in obs_keys:
-            key_dim = self.algo_obs_dim_dict[obs_key]
-            assert isinstance(key_dim, int), (
-                f"Observation dimension for {obs_key} is not an integer: {key_dim}"
-            )
-            # Note: algo_obs_dim_dict from observation_manager.get_obs_dims() already includes history
-            obs_dim += key_dim
-        return obs_dim
-
-    def _get_zero_input(self):
-        """
-        Create a dummy (all-zero) input for the actor.
-
-        During training, we cannot use the logic in `self.get_example_obs()`, since it resets environments mid-rollout.
-        """
-        actor_obs_dim = self._get_obs_dim(self.actor_obs_keys)
-        return torch.zeros(1, actor_obs_dim, device=self.device)
-
     def _setup_storage(self):
         self.storage = RolloutStorage(
             self.env.num_envs, self.config.num_steps_per_env, device=self.device
         )
-        actor_obs_dim = self._get_obs_dim(self.actor_obs_keys)
-        print(f"Registering key: actor_obs with shape: {actor_obs_dim}")
-        self.storage.register("actor_obs", shape=(actor_obs_dim,), dtype=torch.float)
 
-        critic_obs_dim = self._get_obs_dim(self.critic_obs_keys)
-        print(f"Registering key: critic_obs with shape: {critic_obs_dim}")
-        self.storage.register("critic_obs", shape=(critic_obs_dim,), dtype=torch.float)
+        self.storage.register(
+            "actor_obs", shape=(self.actor_obs_dim_dict["policy"],), dtype=torch.float
+        )
+        self.storage.register(
+            "critic_obs", shape=(self.critic_obs_dim_dict["critic"],), dtype=torch.float
+        )
+        if "policy_encoder" in self.actor_obs_dim_dict:
+            self.storage.register(
+                "actor_obs_encoder",
+                shape=self.actor_obs_dim_dict["policy_encoder"],
+                dtype=torch.float,
+            )
+        if "critic_encoder" in self.critic_obs_dim_dict:
+            self.storage.register(
+                "critic_obs_encoder",
+                shape=self.critic_obs_dim_dict["critic_encoder"],
+                dtype=torch.float,
+            )
 
         # Register others based on Minibatch structure
         minibatch_keys = [
-            ("actions", (self.num_act,), torch.float),
+            ("actions", (self.num_actions,), torch.float),
             ("rewards", (1,), torch.float),
             ("dones", (1,), torch.bool),
             ("values", (1,), torch.float),
             ("returns", (1,), torch.float),
             ("advantages", (1,), torch.float),
             ("actions_log_prob", (1,), torch.float),
-            ("action_mean", (self.num_act,), torch.float),
-            ("action_sigma", (self.num_act,), torch.float),
+            ("action_mean", (self.num_actions,), torch.float),
+            ("action_sigma", (self.num_actions,), torch.float),
         ]
         for key, shape, dtype in minibatch_keys:
             self.storage.register(key, shape=shape, dtype=dtype)
@@ -272,9 +272,12 @@ class PPO(BaseAlgo):
         self.critic.train()
 
     def learn(self):
+        # Initialize the logging writer
+        self.logger.init_logging_writer()
+
         self._train_mode()
 
-        obs_dict = self.env.reset_all()
+        obs_dict, _ = self.env.reset()
 
         # Initialize environments with different episode length buffers
         # Must happen AFTER reset_all() to avoid being overwritten by reset
@@ -282,8 +285,8 @@ class PPO(BaseAlgo):
             self.env.episode_length_buf = torch.randint_like(
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
-        for obs_key in obs_dict:
-            obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
+        # for obs_key in obs_dict:
+        #     obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
 
         for it in range(
             self.current_learning_iteration,
@@ -295,50 +298,65 @@ class PPO(BaseAlgo):
             if self.is_multi_gpu:
                 self._synchronize_curriculum_metrics()
 
-            with self.logging_helper.record_collection_time():
-                obs_dict = self._rollout_step(obs_dict)
+            start_collect_time = time.time()
 
-            with self.logging_helper.record_learn_time():
-                loss_dict = self._training_step()
+            obs_dict = self._rollout_step(obs_dict)
 
-            if self.is_main_process:
-                self._post_epoch_logging(it, loss_dict)
+            collect_time = time.time() - start_collect_time
+
+            loss_dict = self._training_step()
+            learn_time = time.time() - start_collect_time
+
+            learning_rate_dict = {
+                "actor_lr": self.actor_optimizer.param_groups[0]["lr"],
+                "critic_lr": self.critic_optimizer.param_groups[0]["lr"],
+            }
+
+            if it % self.config.logging_interval == 0:
+                self.logger.log(
+                    it=it,
+                    start_it=0,  # TODO: support resuming
+                    total_it=self.config.num_learning_iterations,
+                    collect_time=collect_time,
+                    learn_time=learn_time,
+                    loss_dict=loss_dict,
+                    learning_rate_dict=learning_rate_dict,
+                    action_std=self.actor.action_std.clone().mean().detach(),
+                )
 
             if it % self.config.save_interval == 0 and self.is_main_process:
-                self.save(os.path.join(self.log_dir, f"model_{it:05d}.pt"))
-                self.export(
-                    onnx_file_path=os.path.join(self.log_dir, f"model_{it:05d}.onnx")
-                )
+                self.save(os.path.join(self.log_dir, "models", f"model_{it}.pt"))
 
         if self.is_main_process:
             self.save(
                 os.path.join(
-                    self.log_dir, f"model_{self.current_learning_iteration:05d}.pt"
-                )
-            )
-            self.export(
-                onnx_file_path=os.path.join(
-                    self.log_dir, f"model_{self.current_learning_iteration:05d}.onnx"
+                    self.log_dir,
+                    "models",
+                    f"model_{self.current_learning_iteration}.pt",
                 )
             )
 
-    def _rollout_step(self, obs_dict):
+    def _rollout_step(
+        self, obs_dict: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
         with torch.inference_mode():
             for _ in range(self.config.num_steps_per_env):
                 # Environment step
-                actor_obs = torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1)
-                critic_obs = torch.cat(
-                    [obs_dict[k] for k in self.critic_obs_keys], dim=1
-                )
+                actor_obs = {}
+                critic_obs = {}
+                for key in self.actor_obs_keys:
+                    actor_obs[key] = obs_dict[key]
+                for key in self.critic_obs_keys:
+                    critic_obs[key] = obs_dict[key]
 
-                actions = self.actor.act({"actor_obs": actor_obs})
-                values = self.critic.evaluate({"critic_obs": critic_obs}).detach()
+                actions = self.actor.act(actor_obs)
+                values = self.critic.evaluate(critic_obs).detach()
 
                 obs_dict, rewards, dones, infos = self.env.step({"actions": actions})
 
-                for obs_key in obs_dict:
-                    obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
-                rewards, dones = rewards.to(self.device), dones.to(self.device)
+                # for obs_key in obs_dict:
+                #     obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
+                # rewards, dones = rewards.to(self.device), dones.to(self.device)
 
                 # Compute bootstrap value for timeouts
                 final_rewards = torch.zeros_like(rewards)
@@ -355,28 +373,43 @@ class PPO(BaseAlgo):
                         1,
                     )
 
-                # Add transition to storage
-                self.storage.add(
-                    actor_obs=actor_obs,
-                    critic_obs=critic_obs,
-                    actions=actions,
-                    values=values,
-                    actions_log_prob=self.actor.get_actions_log_prob(actions)
-                    .detach()
-                    .unsqueeze(1),
-                    action_mean=self.actor.action_mean.detach(),
-                    action_sigma=self.actor.action_std.detach(),
-                    rewards=(rewards + final_rewards).view(-1, 1),
-                    dones=dones.view(-1, 1),
-                )
+                if ("policy_encoder" in self.actor_obs_keys) and (
+                    "critic_encoder" in self.critic_obs_keys
+                ):
+                    # Add transition to storage
+                    self.storage.add(
+                        actor_obs=actor_obs["policy"],
+                        critic_obs=critic_obs["critic"],
+                        actor_obs_encoder=actor_obs["policy_encoder"],
+                        critic_obs_encoder=critic_obs["critic_encoder"],
+                        actions=actions,
+                        values=values,
+                        actions_log_prob=self.actor.get_actions_log_prob(actions)
+                        .detach()
+                        .unsqueeze(1),
+                        action_mean=self.actor.action_mean.detach(),
+                        action_sigma=self.actor.action_std.detach(),
+                        rewards=(rewards + final_rewards).view(-1, 1),
+                        dones=dones.view(-1, 1),
+                    )
+                else:
+                    # Add transition to storage
+                    self.storage.add(
+                        actor_obs=actor_obs,
+                        critic_obs=critic_obs,
+                        actions=actions,
+                        values=values,
+                        actions_log_prob=self.actor.get_actions_log_prob(actions)
+                        .detach()
+                        .unsqueeze(1),
+                        action_mean=self.actor.action_mean.detach(),
+                        action_sigma=self.actor.action_std.detach(),
+                        rewards=(rewards + final_rewards).view(-1, 1),
+                        dones=dones.view(-1, 1),
+                    )
 
-                # Reset actor and critic for completed envs
-                self.actor.reset(dones)
-                self.critic.reset(dones)
-
-                if self.log_dir is not None:
-                    # Update episode stats using logging helper
-                    self.logging_helper.update_episode_stats(rewards, dones, infos)
+                # log rollout
+                self.logger.process_env_step(rewards, dones, infos)
 
             # Return / Advantage computation
             last_critic_obs = torch.cat(
@@ -399,7 +432,13 @@ class PPO(BaseAlgo):
 
         return obs_dict
 
-    def _compute_returns_and_advantages(self, last_values, values, dones, rewards):
+    def _compute_returns_and_advantages(
+        self,
+        last_values: torch.Tensor,
+        values: torch.Tensor,
+        dones: torch.Tensor,
+        rewards: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         advantage = 0
         returns = torch.zeros_like(values)
         num_steps = returns.shape[0]
@@ -444,7 +483,9 @@ class PPO(BaseAlgo):
         self.storage.clear()
         return loss_dict
 
-    def _update_algo_step(self, minibatch: Minibatch, loss_dict: dict[str, float]):
+    def _update_algo_step(
+        self, minibatch: Minibatch, loss_dict: dict[str, float]
+    ) -> dict[str, float]:
         ppo_loss_dict = self._compute_ppo_loss(minibatch)
 
         self.actor_optimizer.zero_grad()
@@ -474,7 +515,9 @@ class PPO(BaseAlgo):
             loss_dict[key] += loss_value
         return loss_dict
 
-    def _compute_ppo_loss(self, minibatch: Minibatch):
+    def _compute_ppo_loss(
+        self, minibatch: Minibatch
+    ) -> dict[str, torch.Tensor | float]:
         actions_batch = minibatch["actions"]
         target_values_batch = minibatch["values"]
         advantages_batch = minibatch["advantages"]
@@ -483,9 +526,11 @@ class PPO(BaseAlgo):
         old_mu_batch = minibatch["action_mean"]
         old_sigma_batch = minibatch["action_sigma"]
 
+        # TODO: process encoder observation in symmetry augmentation
+
         # Symmetry augmentation
         original_batch_size = actions_batch.shape[0]
-        if self.use_symmetry:
+        if self.config.use_symmetry:
             actor_obs = self.symmetry_utils.augment_observations(
                 obs=minibatch["actor_obs"],
                 env=self.env,
@@ -508,8 +553,8 @@ class PPO(BaseAlgo):
             actor_obs = minibatch["actor_obs"]
             critic_obs = minibatch["critic_obs"]
 
-        self.actor.act({"actor_obs": actor_obs})
-        value_batch = self.critic.evaluate({"critic_obs": critic_obs})
+        self.actor.act({"policy": actor_obs})
+        value_batch = self.critic.evaluate({"critic": critic_obs})
         actions_log_prob_batch = self.actor.get_actions_log_prob(actions_batch)
         mu_batch = self.actor.action_mean[:original_batch_size]
         sigma_batch = self.actor.action_std[:original_batch_size]
@@ -540,12 +585,12 @@ class PPO(BaseAlgo):
         value_losses_clipped = (value_clipped - returns_batch).pow(2)
         value_loss = torch.max(value_losses, value_losses_clipped).mean()
 
-        if self.use_symmetry and (
+        if self.config.use_symmetry and (
             self.config.symmetry_actor_coef > 0.0
             or self.config.symmetry_critic_coef > 0.0
         ):
             mean_actions_batch = self.actor.act_inference(
-                {"actor_obs": actor_obs.detach().clone()}
+                {"policy": actor_obs.detach().clone()}
             )
             mean_actions_for_original_batch, mean_actions_for_symmetry_batch = (
                 mean_actions_batch[:original_batch_size],
@@ -649,7 +694,6 @@ class PPO(BaseAlgo):
                 ][0]["lr"]
                 logger.info("Optimizer loaded from checkpoint")
             self.current_learning_iteration = loaded_dict["iter"]
-            self._restore_env_state(loaded_dict.get("env_state"))
             return loaded_dict.get("infos")
         return None
 
@@ -662,10 +706,6 @@ class PPO(BaseAlgo):
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
-        checkpoint_dict.update(
-            self._checkpoint_metadata(iteration=self.current_learning_iteration)
-        )
-        env_state = self._collect_env_state()
-        if env_state:
-            checkpoint_dict["env_state"] = env_state
-        self.logging_helper.save_checkpoint_artifact(checkpoint_dict, path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(checkpoint_dict, path)
+        self.logger.save_model(path, self.current_learning_iteration)

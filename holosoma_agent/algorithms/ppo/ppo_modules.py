@@ -13,19 +13,14 @@ from holosoma_agent.algorithms.ppo.modules import BaseModule
 class PPOActor(nn.Module):
     def __init__(
         self,
-        obs_dim_dict,
+        obs_dim_dict: dict[str, int],
         module_config_dict: ModuleConfig,
-        num_actions,
-        init_noise_std,
-        history_length: dict[str, int],
+        num_actions: int,
+        init_noise_std: float,
     ):
         super().__init__()
 
-        module_config_dict = self._process_module_config(
-            module_config_dict, num_actions
-        )
-
-        self.actor_module = BaseModule(obs_dim_dict, module_config_dict, history_length)
+        self.actor_module = BaseModule(obs_dim_dict, num_actions, module_config_dict)
 
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.min_noise_std = module_config_dict.min_noise_std
@@ -34,12 +29,6 @@ class PPOActor(nn.Module):
         # disable args validation for speedup
         Normal.set_default_validate_args(False)
         print(f"Actor Module: {self.actor_module.module}")
-
-    def _process_module_config(self, module_config_dict, num_actions):
-        for idx, output_dim in enumerate(module_config_dict.output_dim):
-            if output_dim == "robot_action_dim":
-                module_config_dict.output_dim[idx] = num_actions
-        return module_config_dict
 
     @property
     def actor(self):
@@ -73,7 +62,7 @@ class PPOActor(nn.Module):
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
-    def update_distribution(self, actor_obs):
+    def update_distribution(self, actor_obs: torch.Tensor):
         mean = self.actor(actor_obs)
         if self.min_noise_std:
             clamped_std = torch.clamp(self.std, min=self.min_noise_std)
@@ -89,15 +78,15 @@ class PPOActor(nn.Module):
         else:
             self.distribution = Normal(mean, mean * 0.0 + self.std)
 
-    def act(self, policy_state_dict):
-        self.update_distribution(policy_state_dict["actor_obs"])
+    def act(self, policy_state_dict: dict[str, torch.Tensor]):
+        self.update_distribution(policy_state_dict["policy"])
         return self.distribution.sample()
 
-    def get_actions_log_prob(self, actions):
+    def get_actions_log_prob(self, actions: torch.Tensor):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
-    def act_inference(self, policy_state_dict):
-        return self.actor(policy_state_dict["actor_obs"])
+    def act_inference(self, policy_state_dict: dict[str, torch.Tensor]):
+        return self.actor(policy_state_dict["policy"])
 
     def to_cpu(self):
         self.actor = deepcopy(self.actor).to("cpu")
@@ -105,13 +94,9 @@ class PPOActor(nn.Module):
 
 
 class PPOCritic(nn.Module):
-    def __init__(
-        self, obs_dim_dict, module_config_dict, history_length: dict[str, int]
-    ):
+    def __init__(self, obs_dim_dict: dict[str, int], module_config_dict: ModuleConfig):
         super().__init__()
-        self.critic_module = BaseModule(
-            obs_dim_dict, module_config_dict, history_length
-        )
+        self.critic_module = BaseModule(obs_dim_dict, 1, module_config_dict)
         print(f"Critic Module: {self.critic_module.module}")
 
     @property
@@ -121,8 +106,8 @@ class PPOCritic(nn.Module):
     def reset(self, dones=None):
         pass
 
-    def evaluate(self, policy_state_dict):
-        critic_obs = policy_state_dict["critic_obs"]
+    def evaluate(self, critic_state_dict: dict[str, torch.Tensor]):
+        critic_obs = critic_state_dict["critic"]
         return self.critic(critic_obs)
 
     def get_hidden_states(self):
@@ -133,89 +118,67 @@ class PPOCritic(nn.Module):
 
 
 class PPOActorEncoder(PPOActor):
-    def __init__(self, obs_dim_dict, module_config_dict, num_actions, init_noise_std):
+    def __init__(
+        self,
+        obs_dim_dict: dict[str, int],
+        module_config_dict: ModuleConfig,
+        num_actions: int,
+        init_noise_std: float,
+    ):
         super().__init__(obs_dim_dict, module_config_dict, num_actions, init_noise_std)
-        self.module_input_name = module_config_dict.layer_config.module_input_name
-        self.encoder_input_name = module_config_dict.layer_config.encoder_input_name
 
-    def _get_input(self, actor_obs: torch.Tensor) -> torch.Tensor:
-        if actor_obs.shape[-1] != self.actor_module.input_dim:
-            raise ValueError(
-                f"Actor Obs must be {self.actor_module.input_dim}, got {actor_obs.shape[-1]}"
-            )
-        self.encoder_obs = actor_obs[
-            ..., self.actor_module.input_indices_dict[self.encoder_input_name]
-        ]
-        self.actor_encoder_obs = (
-            self.actor_module.encoder(self.encoder_obs)
+    def process_encoder(
+        self, obs: torch.Tensor, encoder_obs: torch.Tensor
+    ) -> torch.Tensor:
+        encoder_obs = (
+            self.actor_module.encoder(encoder_obs)
             if self.actor_module.encoder is not None
-            else self.encoder_obs
+            else encoder_obs
         )
-        self.actor_state_obs = torch.cat(
-            [
-                actor_obs[..., self.actor_module.input_indices_dict[actor_input_name]]
-                for actor_input_name in self.module_input_name
-            ],
-            -1,
-        )
-        return torch.cat((self.actor_encoder_obs, self.actor_state_obs), dim=-1)
+        return torch.cat([encoder_obs, obs], dim=-1)
 
-    def act(self, policy_state_dict):
-        actor_obs = policy_state_dict["actor_obs"]
-        input_actor = self._get_input(actor_obs)
-        return super().act({"actor_obs": input_actor})
+    def act(self, policy_state_dict: dict[str, torch.Tensor]):
+        actor_obs = policy_state_dict["policy"]
+        encoder_obs = policy_state_dict["policy_encoder"]
+        input_actor = self.process_encoder(actor_obs, encoder_obs)
+        return super().act({"policy": input_actor})
 
-    def act_inference(self, policy_state_dict):
-        actor_obs = policy_state_dict["actor_obs"]
-        input_actor = self._get_input(actor_obs)
-        return super().act_inference({"actor_obs": input_actor})
+    def act_inference(self, policy_state_dict: dict[str, torch.Tensor]):
+        actor_obs = policy_state_dict["policy"]
+        encoder_obs = policy_state_dict["policy_encoder"]
+        input_actor = self.process_encoder(actor_obs, encoder_obs)
+        return super().act_inference({"policy": input_actor})
 
 
 class PPOCriticEncoder(PPOCritic):
-    def __init__(self, obs_dim_dict, module_config_dict):
+    def __init__(self, obs_dim_dict: dict[str, int], module_config_dict: ModuleConfig):
         super().__init__(obs_dim_dict, module_config_dict)
-        self.module_input_name = module_config_dict.layer_config.module_input_name
-        self.encoder_input_name = module_config_dict.layer_config.encoder_input_name
 
-    def _get_input(self, critic_obs: torch.Tensor) -> torch.Tensor:
-        if critic_obs.shape[-1] != self.critic_module.input_dim:
-            raise ValueError(
-                f"Critic Obs must be {self.critic_module.input_dim}, got {critic_obs.shape[-1]}"
-            )
-        self.encoder_obs = critic_obs[
-            ..., self.critic_module.input_indices_dict[self.encoder_input_name]
-        ]
-        self.critic_encoder_obs = (
-            self.critic_module.encoder(self.encoder_obs)
+    def process_encoder(
+        self, obs: torch.Tensor, encoder_obs: torch.Tensor
+    ) -> torch.Tensor:
+        encoder_obs = (
+            self.critic_module.encoder(encoder_obs)
             if self.critic_module.encoder is not None
-            else self.encoder_obs
+            else encoder_obs
         )
-        self.critic_state_obs = torch.cat(
-            [
-                critic_obs[
-                    ..., self.critic_module.input_indices_dict[critic_input_name]
-                ]
-                for critic_input_name in self.module_input_name
-            ],
-            -1,
-        )
-        return torch.cat((self.critic_encoder_obs, self.critic_state_obs), dim=-1)
+        return torch.cat([encoder_obs, obs], dim=-1)
 
-    def evaluate(self, policy_state_dict):
-        critic_obs = policy_state_dict["critic_obs"]
-        input_critic = self._get_input(critic_obs)
-        return super().evaluate({"critic_obs": input_critic})
+    def evaluate(self, critic_state_dict: dict[str, torch.Tensor]):
+        critic_obs = critic_state_dict["critic"]
+        encoder_obs = critic_state_dict["critic_encoder"]
+        input_critic = self.process_encoder(critic_obs, encoder_obs)
+        return super().evaluate({"critic": input_critic})
 
 
 def setup_ppo_actor_module(
-    obs_dim_dict,
-    module_config,
-    num_actions,
-    init_noise_std,
-    device,
-    history_length: dict[str, int],
+    obs_dim_dict: dict[str, int],
+    module_config: ModuleConfig,
+    num_actions: int,
+    init_noise_std: float,
+    device: torch.device | str,
 ):
-    module_type = module_config.type
+    module_type = module_config.module_type
     if module_type in ["MLPEncoder", "CNNEncoder"]:
         return PPOActorEncoder(
             obs_dim_dict=obs_dim_dict,
@@ -229,19 +192,17 @@ def setup_ppo_actor_module(
             module_config_dict=module_config,
             num_actions=num_actions,
             init_noise_std=init_noise_std,
-            history_length=history_length,
         ).to(device)
 
     raise ValueError(f"Invalid actor type: {module_type}")
 
 
 def setup_ppo_critic_module(
-    obs_dim_dict,
-    module_config,
-    device,
-    history_length: dict[str, int],
+    obs_dim_dict: dict[str, int],
+    module_config: ModuleConfig,
+    device: torch.device | str,
 ):
-    module_type = module_config.type
+    module_type = module_config.module_type
     if module_type in ["MLPEncoder", "CNNEncoder"]:
         return PPOCriticEncoder(
             obs_dim_dict=obs_dim_dict,
@@ -251,6 +212,5 @@ def setup_ppo_critic_module(
         return PPOCritic(
             obs_dim_dict=obs_dim_dict,
             module_config_dict=module_config,
-            history_length=history_length,
         ).to(device)
     raise ValueError(f"Invalid critic type: {module_type}")
