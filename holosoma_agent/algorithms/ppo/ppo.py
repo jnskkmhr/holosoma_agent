@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import pathlib
 import time
+import copy
+from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -634,3 +636,35 @@ class PPO(BaseAlgo):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(checkpoint_dict, path)
         self.logger.save_model(path, self.current_learning_iteration)
+
+    def get_inference_policy(
+        self, device: str | None = None
+    ) -> Callable[[dict[str, torch.Tensor]], torch.Tensor]:
+        device = device or self.device
+        # Use the underlying module for inference
+        policy = self.actor.to(device)
+        policy.eval()
+
+        def policy_fn(obs: dict[str, torch.Tensor]) -> torch.Tensor:
+            action, _, _ = policy(obs["policy"])
+            return action
+
+        return policy_fn
+
+    @property
+    def actor_onnx_wrapper(self):
+        # Use the underlying module for ONNX export
+        actor = copy.deepcopy(self.actor).to("cpu")
+        actor.action_scale = actor.action_scale.to("cpu")  # TODO: brutal?
+
+        class ActorWrapper(nn.Module):
+            def __init__(self, actor):
+                super().__init__()
+                self.actor = actor
+
+            def forward(self, actor_obs):
+                # Actions are already scaled by the actor
+                action, _, _ = self.actor(actor_obs)
+                return action
+
+        return ActorWrapper(actor)
