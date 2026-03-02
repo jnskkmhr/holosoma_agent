@@ -104,7 +104,7 @@ class PPO(BaseAlgo):
                 )
 
     def _setup_models_and_optimizer(self):
-        # TODO: manual mapping is bit messy?
+        # NOTE: manual mapping is bit messy?
         actor_obs_dim_dict = {}
         if "policy" in self.actor_obs_dim_dict:
             actor_obs_dim_dict["mlp"] = self.actor_obs_dim_dict["policy"]
@@ -454,33 +454,58 @@ class PPO(BaseAlgo):
         old_mu_batch = minibatch["action_mean"]
         old_sigma_batch = minibatch["action_sigma"]
 
-        # TODO: process encoder observation in symmetry augmentation
-
         # Symmetry augmentation
         original_batch_size = actions_batch.shape[0]
         if self.config.use_symmetry:
-            actor_obs = self.symmetry_utils.augment_observations(
-                obs=minibatch["actor_obs"],
-                obs_list=self.actor_obs_keys,
-            )
-            critic_obs = self.symmetry_utils.augment_observations(
-                obs=minibatch["critic_obs"],
-                obs_list=self.critic_obs_keys,
-            )
+            actor_obs = {
+                "policy": self.symmetry_utils.augment_observations(
+                    obs=minibatch["actor_obs"],
+                    obs_list=self.actor_obs_keys,
+                )
+            }
+            critic_obs = {
+                "critic": self.symmetry_utils.augment_observations(
+                    obs=minibatch["critic_obs"],
+                    obs_list=self.critic_obs_keys,
+                )
+            }
+            if "actor_obs_encoder" in minibatch:
+                actor_obs.update(
+                    {
+                        "policy_encoder": self.symmetry_utils.augment_observations(
+                            obs=minibatch["actor_obs_encoder"],
+                            obs_list=["policy_encoder"],
+                        )
+                    }
+                )
+            if "critic_obs_encoder" in minibatch:
+                critic_obs.update(
+                    {
+                        "critic_encoder": self.symmetry_utils.augment_observations(
+                            obs=minibatch["critic_obs_encoder"],
+                            obs_list=["critic_encoder"],
+                        )
+                    }
+                )
+
             actions_batch = self.symmetry_utils.augment_actions(
                 actions=actions_batch,
             )
-            num_aug = int(actor_obs.shape[0] / original_batch_size)
+            num_aug = int(actor_obs["policy"].shape[0] / original_batch_size)
             old_actions_log_prob_batch = old_actions_log_prob_batch.repeat(num_aug, 1)
             target_values_batch = target_values_batch.repeat(num_aug, 1)
             advantages_batch = advantages_batch.repeat(num_aug, 1)
             returns_batch = returns_batch.repeat(num_aug, 1)
         else:
-            actor_obs = minibatch["actor_obs"]
-            critic_obs = minibatch["critic_obs"]
+            actor_obs = {"policy": minibatch["actor_obs"]}
+            critic_obs = {"critic": minibatch["critic_obs"]}
+            if "actor_obs_encoder" in minibatch:
+                actor_obs.update({"policy_encoder": minibatch["actor_obs_encoder"]})
+            if "critic_obs_encoder" in minibatch:
+                critic_obs.update({"critic_encoder": minibatch["critic_obs_encoder"]})
 
-        self.actor.act({"policy": actor_obs})
-        value_batch = self.critic.evaluate({"critic": critic_obs})
+        self.actor.act(actor_obs)
+        value_batch = self.critic.evaluate(critic_obs)
         actions_log_prob_batch = self.actor.get_actions_log_prob(actions_batch)
         mu_batch = self.actor.action_mean[:original_batch_size]
         sigma_batch = self.actor.action_std[:original_batch_size]
@@ -515,9 +540,12 @@ class PPO(BaseAlgo):
             self.config.symmetry_actor_coef > 0.0
             or self.config.symmetry_critic_coef > 0.0
         ):
-            mean_actions_batch = self.actor.act_inference(
-                {"policy": actor_obs.detach().clone()}
-            )
+            actor_obs_inf = {"policy": actor_obs["policy"].detach().clone()}
+            if "policy_encoder" in actor_obs:
+                actor_obs_inf.update(
+                    {"policy_encoder": actor_obs["policy_encoder"].detach().clone()}
+                )
+            mean_actions_batch = self.actor.act_inference(actor_obs_inf)
             mean_actions_for_original_batch, mean_actions_for_symmetry_batch = (
                 mean_actions_batch[:original_batch_size],
                 mean_actions_batch[original_batch_size:],
@@ -636,34 +664,20 @@ class PPO(BaseAlgo):
         torch.save(checkpoint_dict, path)
         self.logger.save_model(path, self.current_learning_iteration)
 
-    def get_inference_policy(
-        self, device: str | None = None
-    ) -> Callable[[dict[str, torch.Tensor]], torch.Tensor]:
-        device = device or self.device
-        # Use the underlying module for inference
-        policy = self.actor.to(device)
-        policy.eval()
-
-        def policy_fn(obs: dict[str, torch.Tensor]) -> torch.Tensor:
-            action, _, _ = policy(obs["policy"])
-            return action
-
-        return policy_fn
+    def get_inference_policy(self, device=None):
+        self.actor.eval()  # switch to evaluation mode (dropout for example)
+        if device is not None:
+            self.actor.to(device)
+        return self.actor.act_inference
 
     @property
     def actor_onnx_wrapper(self):
-        # Use the underlying module for ONNX export
-        actor = copy.deepcopy(self.actor).to("cpu")
-        actor.action_scale = actor.action_scale.to("cpu")  # TODO: brutal?
-
         class ActorWrapper(nn.Module):
             def __init__(self, actor):
                 super().__init__()
                 self.actor = actor
 
-            def forward(self, actor_obs):
-                # Actions are already scaled by the actor
-                action, _, _ = self.actor(actor_obs)
-                return action
+            def forward(self, actor_obs: dict[str, torch.Tensor]) -> torch.Tensor:
+                return self.actor.act_inference(actor_obs)
 
-        return ActorWrapper(actor)
+        return ActorWrapper(self.actor)

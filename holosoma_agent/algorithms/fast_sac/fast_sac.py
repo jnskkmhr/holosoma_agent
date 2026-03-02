@@ -19,8 +19,10 @@ from torch.amp import GradScaler, autocast
 from holosoma_agent.algorithms.base_algo import BaseAlgo
 from holosoma_agent.algorithms.fast_sac.networks import (
     Actor,
+    ActorEncoder,
     CNNActor,
     Critic,
+    CriticEncoder,
     CNNCritic,
 )
 from holosoma_agent.algorithms.fast_sac.fast_sac_utils import (
@@ -102,9 +104,14 @@ class FastSACAgent(BaseAlgo):
             self.critic_obs_normalizer = torch.nn.Identity()
 
         # Select actor/critic class
-        if self.config.use_cnn_encoder:
+        if self.config.module_type == "MLP":
+            actor_cls, critic_cls = Actor, Critic
+        elif self.config.module_type == "MLPEncoder":
+            actor_cls, critic_cls = ActorEncoder, CriticEncoder
+        elif self.config.module_type == "CNNEncoder":
             actor_cls, critic_cls = CNNActor, CNNCritic
         else:
+            logger.warning(f"Unknown module type: {self.config.module_type}, using MLP")
             actor_cls, critic_cls = Actor, Critic
 
         self.actor = actor_cls(
@@ -819,25 +826,12 @@ class FastSACAgent(BaseAlgo):
 
         return policy_fn
 
-    @torch.no_grad()
-    def evaluate_policy(self, max_eval_steps: int | None = None):
-        obs_dict, _ = self.env.reset()
-
-        for _ in itertools.islice(itertools.count(), max_eval_steps):
-            if self.obs_normalizer:
-                normalized_obs = self.obs_normalizer(obs_dict["policy"], update=False)
-            else:
-                normalized_obs = obs_dict["policy"]
-            # Actions are already scaled by the actor
-            actions, _, _ = self.actor(normalized_obs)
-            obs_dict, _, _, _ = self.env.step(actions)
-
     @property
-    def actor_onnx_wrapper(self):
-        # Use the underlying module for ONNX export
+    def actor_onnx_wrapper(self) -> nn.Module:
+        # Use the underlying module for JIT/ONNX export
         actor = copy.deepcopy(self.actor).to("cpu")
         obs_normalizer = copy.deepcopy(self.obs_normalizer).to("cpu")
-        actor.action_scale = actor.action_scale.to("cpu")  # TODO: brutal?
+        actor.action_scale = actor.action_scale.to("cpu")
 
         class ActorWrapper(nn.Module):
             def __init__(self, actor, obs_normalizer):
@@ -845,7 +839,7 @@ class FastSACAgent(BaseAlgo):
                 self.actor = actor
                 self.obs_normalizer = obs_normalizer
 
-            def forward(self, actor_obs):
+            def forward(self, actor_obs: torch.Tensor) -> torch.Tensor:
                 if self.obs_normalizer is not None:
                     normalized_obs = self.obs_normalizer(actor_obs, update=False)
                 else:

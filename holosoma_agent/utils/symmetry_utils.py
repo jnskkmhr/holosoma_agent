@@ -75,11 +75,15 @@ class SymmetryUtils:
         self.sub_observation_dims = {group_name: {} for group_name in term_names.keys()}
 
         # process
+        # NOTE: only flat observations (batch_size, dim) are supported for now
+        # The way to go about image for CNN is flatten it first, and then reshape later
         for group_name in term_names.keys():
             if group_name in [
                 "policy",
+                "policy_encoder",
                 "critic",
-            ]:  # TODO: grab obs, critic groups from config
+                "critic_encoder",
+            ]:
                 history_length = term_cfgs[group_name]["history_length"]
                 for i, term_name in enumerate(term_names[group_name]):
                     sub_obs_dim = term_dims[group_name][i][0]

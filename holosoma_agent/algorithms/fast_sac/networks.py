@@ -166,6 +166,33 @@ class Actor(nn.Module):
 
 
 # TODO: add it later
+class ActorEncoder(Actor):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        log_std_max: float,
+        log_std_min: float,
+        use_tanh: bool = True,
+        use_layer_norm: bool = True,
+        device: torch.device | str | None = None,
+        action_scale: torch.Tensor | None = None,
+    ):
+        super().__init__(
+            obs_dim,
+            action_dim,
+            hidden_dim,
+            log_std_max,
+            log_std_min,
+            use_tanh,
+            use_layer_norm,
+            device,
+            action_scale,
+        )
+
+
+# TODO: add it later
 class CNNActor(Actor):
     def __init__(
         self,
@@ -476,6 +503,33 @@ class Critic(nn.Module):
             for qnet in self.qnets
         ]
         return torch.stack(projections, dim=0)
+
+
+# TODO: add it later
+class CriticEncoder(Critic):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dim: int,
+        num_atoms: int,
+        v_min: float,
+        v_max: float,
+        use_layer_norm: bool = True,
+        num_q_networks: int = 2,
+        device: torch.device | None = None,
+    ):
+        super().__init__(
+            obs_dim,
+            action_dim,
+            hidden_dim,
+            num_atoms,
+            v_min,
+            v_max,
+            use_layer_norm,
+            num_q_networks,
+            device,
+        )
 
 
 # TODO: implement CNN later
