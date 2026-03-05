@@ -12,6 +12,7 @@ uv pip install -e .
 - [x] Implement symmetry augmentation 
 - [x] Config refactoring
 - [x] PPO implementation 
+- [ ] PPO-SAC actor compatibility so that finetuning is possible 
 - [ ] MLP/CNN encoder check 
 - [ ] Refactoring 
 - [ ] Add documentation

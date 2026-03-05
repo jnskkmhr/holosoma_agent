@@ -184,6 +184,33 @@ class FastSACAgent(BaseAlgo):
             betas=(0.9, 0.95),
         )
 
+        # AMP scaler
+        if self.config.amp:
+            dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16}
+            self.amp_dtype = dtype_map.get(self.config.amp_dtype, torch.bfloat16)
+            self.scaler = GradScaler() if self.amp_dtype == torch.float16 else None
+        else:
+            self.amp_dtype = None
+            self.scaler = None
+        self.scaler = GradScaler(enabled=self.config.amp)
+
+        logger.info("FastSAC network setup complete")
+
+    def setup_learning(self):
+        env = self.env
+
+        # I think this is smarter than defining everything in config like holosoma
+        obs_space = env.observation_space  # gymnasium.spaces.dict.Dict
+        actor_obs_space_shape = [
+            obs_space[k].shape[-1] for k in self.config.actor_obs_keys
+        ]
+        actor_obs_dim = sum(actor_obs_space_shape)
+
+        critic_obs_space_shape = [
+            obs_space[k].shape[-1] for k in self.config.critic_obs_keys
+        ]
+        critic_obs_dim = sum(critic_obs_space_shape)
+
         # Replay buffer
         self.rb = SimpleReplayBuffer(
             n_env=env.num_envs,
@@ -195,16 +222,6 @@ class FastSACAgent(BaseAlgo):
             gamma=self.config.gamma,
             device=self.device,
         )
-
-        # AMP scaler
-        if self.config.amp:
-            dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16}
-            self.amp_dtype = dtype_map.get(self.config.amp_dtype, torch.bfloat16)
-            self.scaler = GradScaler() if self.amp_dtype == torch.float16 else None
-        else:
-            self.amp_dtype = None
-            self.scaler = None
-        self.scaler = GradScaler(enabled=self.config.amp)
 
         # Logging
         self.logger = Logger(
@@ -225,8 +242,6 @@ class FastSACAgent(BaseAlgo):
 
         if self.is_multi_gpu:
             self._synchronize_model_parameters(self.actor, self.qnet)
-
-        logger.info("FastSACAgent setup complete")
 
     """
     multi-gpu training utils
@@ -564,6 +579,8 @@ class FastSACAgent(BaseAlgo):
         args = self.config
         device = self.device
 
+        self.setup_learning()
+
         # Initialize the logging writer
         self.logger.init_logging_writer()
 
@@ -596,7 +613,11 @@ class FastSACAgent(BaseAlgo):
         actor_grad_norm = torch.tensor(0.0, device=device)
         # pbar = tqdm.tqdm(total=args.num_learning_iterations, initial=self.global_step)
 
-        while self.global_step <= args.num_learning_iterations:
+        # while self.global_step <= args.num_learning_iterations:
+        for it in range(
+            self.global_step, self.global_step + args.num_learning_iterations
+        ):
+            self.global_step = it
             # Synchronize curriculum metrics across GPUs before rollout
             if self.is_multi_gpu:
                 self._synchronize_curriculum_metrics()
@@ -741,15 +762,6 @@ class FastSACAgent(BaseAlgo):
                                 f"model_{self.global_step}.pt",
                             )
                         )
-
-            # Avoid global_step being incremented beyond args.num_learning_iterations, so that the final checkpoint is
-            # saved at exactly args.num_learning_iterations. In the `while` condition, we check for self.global_step <=
-            # args.num_learning_iterations, so that we have complete logging data at the final step too (assuming
-            # `args.num_learning_iterations` is a multiple of `args.logging_interval`).
-            if self.global_step >= args.num_learning_iterations:
-                break
-            self.global_step += 1
-            # pbar.update(1)
 
         if self.is_main_process:
             self.save(

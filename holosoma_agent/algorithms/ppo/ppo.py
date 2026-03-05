@@ -286,18 +286,8 @@ class PPO(BaseAlgo):
                 # Compute bootstrap value for timeouts
                 final_rewards = torch.zeros_like(rewards)
                 if infos["time_outs"].any():
-                    # final_critic_obs = torch.cat(
-                    #     [infos["final_observations"][k] for k in self.critic_obs_keys],
-                    #     dim=1,
-                    # )
-                    # final_values = self.critic.evaluate(
-                    #     {"critic": final_critic_obs}
-                    # ).detach()
-                    final_values = self.critic.evaluate(
-                        {"critic": obs_dict["critic"]}
-                    ).detach()
                     final_rewards += self.config.gamma * torch.squeeze(
-                        final_values * infos["time_outs"].unsqueeze(1).to(self.device),
+                        values * infos["time_outs"].unsqueeze(1).to(self.device),
                         1,
                     )
 
@@ -511,12 +501,14 @@ class PPO(BaseAlgo):
         sigma_batch = self.actor.action_std[:original_batch_size]
         entropy_batch = self.actor.entropy[:original_batch_size]
 
+        kl_mean = torch.tensor(0.0, device=self.device)
         if self.config.desired_kl is not None and self.config.schedule == "adaptive":
-            # Compute the KL divergence between the old and new action distributions
-            kl_mean = self._compute_kl_div(
-                old_mu_batch, old_sigma_batch, mu_batch, sigma_batch
-            )
-            self._update_learning_rate(kl_mean)
+            with torch.inference_mode():
+                # Compute the KL divergence between the old and new action distributions
+                kl_mean = self._compute_kl_div(
+                    old_mu_batch, old_sigma_batch, mu_batch, sigma_batch
+                )
+                self._update_learning_rate(kl_mean)
 
         # Surrogate loss
         ratio = torch.exp(
@@ -651,6 +643,18 @@ class PPO(BaseAlgo):
             return loaded_dict.get("infos")
         return None
 
+    def load_sac_actor(self, ckpt_path: str | None) -> None:
+        if not ckpt_path:
+            return
+
+        loaded_dict = torch.load(ckpt_path, map_location=self.device)
+
+        actor_state_dict = loaded_dict["actor_state_dict"]
+        self.actor.load_state_dict(actor_state_dict)
+
+        self.log_alpha.data.copy_(loaded_dict["log_alpha"].to(self.device))
+        self.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
+
     def save(self, path, infos=None):
         checkpoint_dict = {
             "actor_model_state_dict": self.actor.state_dict(),
@@ -676,6 +680,7 @@ class PPO(BaseAlgo):
             def __init__(self, actor):
                 super().__init__()
                 self.actor = actor
+                self.actor.to("cpu")
 
             def forward(self, actor_obs: dict[str, torch.Tensor]) -> torch.Tensor:
                 return self.actor.act_inference(actor_obs)
