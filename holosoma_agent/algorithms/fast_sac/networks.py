@@ -19,7 +19,7 @@ class Actor(nn.Module):
         self,
         obs_dim: int,
         action_dim: int,
-        hidden_dim: int,
+        hidden_dim: list[int],
         log_std_max: float,
         log_std_min: float,
         use_tanh: bool = True,
@@ -52,39 +52,20 @@ class Actor(nn.Module):
         self.setup_network()
 
     def setup_network(self) -> None:
-        # NOTE: rsl rl finds out obs_dim in constructor with initial observation as input
-        if self.use_layer_norm:
-            self.net = nn.Sequential(
-                nn.Linear(self.obs_dim, self.hidden_dim, device=self.device),
-                nn.LayerNorm(self.hidden_dim, device=self.device),
-                nn.SiLU(),
-                nn.Linear(self.hidden_dim, self.hidden_dim // 2, device=self.device),
-                nn.LayerNorm(self.hidden_dim // 2, device=self.device),
-                nn.SiLU(),
-                nn.Linear(
-                    self.hidden_dim // 2, self.hidden_dim // 4, device=self.device
-                ),
-                nn.LayerNorm(self.hidden_dim // 4, device=self.device),
-                nn.SiLU(),
-            )
-        else:
-            self.net = nn.Sequential(
-                nn.Linear(self.obs_dim, self.hidden_dim, device=self.device),
-                nn.SiLU(),
-                nn.Linear(self.hidden_dim, self.hidden_dim // 2, device=self.device),
-                nn.SiLU(),
-                nn.Linear(
-                    self.hidden_dim // 2, self.hidden_dim // 4, device=self.device
-                ),
-                nn.SiLU(),
-            )
+        # Build MLP dynamically from self.hidden_dim list.
+        # Each element is one hidden layer; consecutive pairs define a Linear layer.
+        dims = [self.obs_dim] + self.hidden_dim  # e.g. [obs, 256, 128, 64]
+        layers: list[nn.Module] = []
+        for in_dim, out_dim in zip(dims[:-1], dims[1:]):
+            layers.append(nn.Linear(in_dim, out_dim, device=self.device))
+            if self.use_layer_norm:
+                layers.append(nn.LayerNorm(out_dim, device=self.device))
+            layers.append(nn.SiLU())
+        self.net = nn.Sequential(*layers)
 
-        self.fc_mean = nn.Linear(
-            self.hidden_dim // 4, self.action_dim, device=self.device
-        )
-        self.fc_log_std = nn.Linear(
-            self.hidden_dim // 4, self.action_dim, device=self.device
-        )
+        last_dim = self.hidden_dim[-1]
+        self.fc_mean = nn.Linear(last_dim, self.action_dim, device=self.device)
+        self.fc_log_std = nn.Linear(last_dim, self.action_dim, device=self.device)
         nn.init.constant_(self.fc_mean.weight, 0.0)
         nn.init.constant_(self.fc_mean.bias, 0.0)
         nn.init.constant_(self.fc_log_std.weight, 0.0)
@@ -165,13 +146,40 @@ class Actor(nn.Module):
         return action
 
 
-# TODO: add it later
+# TODO: Implement MLP encoder later
+class ActorEncoder(Actor):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dim: list[int],
+        log_std_max: float,
+        log_std_min: float,
+        use_tanh: bool = True,
+        use_layer_norm: bool = True,
+        device: torch.device | str | None = None,
+        action_scale: torch.Tensor | None = None,
+    ):
+        super().__init__(
+            obs_dim,
+            action_dim,
+            hidden_dim,
+            log_std_max,
+            log_std_min,
+            use_tanh,
+            use_layer_norm,
+            device,
+            action_scale,
+        )
+
+
+# TODO: Implement CNN encoder later
 class CNNActor(Actor):
     def __init__(
         self,
         obs_dim: int,
         action_dim: int,
-        hidden_dim: int,
+        hidden_dim: list[int],
         log_std_max: float,
         log_std_min: float,
         use_tanh: bool = True,
@@ -289,7 +297,7 @@ class DistributionalQNetwork(nn.Module):
         self,
         obs_dim: int,
         action_dim: int,
-        hidden_dim: int,
+        hidden_dim: list[int],
         num_atoms: int,
         v_min: float,
         v_max: float,
@@ -306,29 +314,17 @@ class DistributionalQNetwork(nn.Module):
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        if use_layer_norm:
-            self.net = nn.Sequential(
-                nn.Linear(obs_dim + action_dim, hidden_dim, device=self.device),
-                nn.LayerNorm(hidden_dim, device=self.device),
-                nn.SiLU(),
-                nn.Linear(hidden_dim, hidden_dim // 2, device=self.device),
-                nn.LayerNorm(hidden_dim // 2, device=self.device),
-                nn.SiLU(),
-                nn.Linear(hidden_dim // 2, hidden_dim // 4, device=self.device),
-                nn.LayerNorm(hidden_dim // 4, device=self.device),
-                nn.SiLU(),
-                nn.Linear(hidden_dim // 4, num_atoms, device=self.device),
-            )
-        else:
-            self.net = nn.Sequential(
-                nn.Linear(obs_dim + action_dim, hidden_dim, device=self.device),
-                nn.SiLU(),
-                nn.Linear(hidden_dim, hidden_dim // 2, device=self.device),
-                nn.SiLU(),
-                nn.Linear(hidden_dim // 2, hidden_dim // 4, device=self.device),
-                nn.SiLU(),
-                nn.Linear(hidden_dim // 4, num_atoms, device=self.device),
-            )
+        # Build MLP dynamically from hidden_dim list.
+        # Input is (obs + action), hidden layers from list, output is num_atoms.
+        dims = [obs_dim + action_dim] + list(hidden_dim)
+        layers: list[nn.Module] = []
+        for in_dim, out_dim in zip(dims[:-1], dims[1:]):
+            layers.append(nn.Linear(in_dim, out_dim, device=self.device))
+            if use_layer_norm:
+                layers.append(nn.LayerNorm(out_dim, device=self.device))
+            layers.append(nn.SiLU())
+        layers.append(nn.Linear(dims[-1], num_atoms, device=self.device))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         x = torch.cat([obs, actions], dim=-1)
@@ -398,7 +394,7 @@ class Critic(nn.Module):
         self,
         obs_dim: int,
         action_dim: int,
-        hidden_dim: int,
+        hidden_dim: list[int],
         num_atoms: int,
         v_min: float,
         v_max: float,
@@ -478,7 +474,34 @@ class Critic(nn.Module):
         return torch.stack(projections, dim=0)
 
 
-# TODO: implement CNN later
+# TODO: Implement MLP encoder later
+class CriticEncoder(Critic):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dim: list[int],
+        num_atoms: int,
+        v_min: float,
+        v_max: float,
+        use_layer_norm: bool = True,
+        num_q_networks: int = 2,
+        device: torch.device | None = None,
+    ):
+        super().__init__(
+            obs_dim,
+            action_dim,
+            hidden_dim,
+            num_atoms,
+            v_min,
+            v_max,
+            use_layer_norm,
+            num_q_networks,
+            device,
+        )
+
+
+# TODO: Implement CNN later
 class CNNCritic(Critic):
     """Ensemble of distributional Q-networks."""
 
@@ -486,7 +509,7 @@ class CNNCritic(Critic):
         self,
         obs_dim: int,
         action_dim: int,
-        hidden_dim: int,
+        hidden_dim: list[int],
         num_atoms: int,
         v_min: float,
         v_max: float,

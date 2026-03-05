@@ -19,8 +19,10 @@ from torch.amp import GradScaler, autocast
 from holosoma_agent.algorithms.base_algo import BaseAlgo
 from holosoma_agent.algorithms.fast_sac.networks import (
     Actor,
+    ActorEncoder,
     CNNActor,
     Critic,
+    CriticEncoder,
     CNNCritic,
 )
 from holosoma_agent.algorithms.fast_sac.fast_sac_utils import (
@@ -28,7 +30,7 @@ from holosoma_agent.algorithms.fast_sac.fast_sac_utils import (
     SimpleReplayBuffer,
     save_params,
 )
-from holosoma_agent.algorithms.modules.symmetry_utils import SymmetryUtils
+from holosoma_agent.utils.symmetry_utils import SymmetryUtils
 from holosoma_agent.utils.logger import Logger
 from holosoma_agent.configs.fast_sac_config import FastSACConfig
 from holosoma_agent.env.fast_sac_env import FastSACVecEnv
@@ -54,7 +56,7 @@ class FastSACAgent(BaseAlgo):
         self,
         env: FastSACVecEnv,
         config: FastSACConfig,
-        device: str,
+        device: str | torch.device = "cpu",
         log_dir: str | pathlib.Path = "./logs",
         multi_gpu_cfg: dict | None = None,
     ):
@@ -75,6 +77,7 @@ class FastSACAgent(BaseAlgo):
         logger.info("Setting up FastSACAgent")
         env = self.env
 
+        # I think this is smarter than defining everything in config like holosoma
         obs_space = env.observation_space  # gymnasium.spaces.dict.Dict
         actor_obs_space_shape = [
             obs_space[k].shape[-1] for k in self.config.actor_obs_keys
@@ -101,15 +104,21 @@ class FastSACAgent(BaseAlgo):
             self.critic_obs_normalizer = torch.nn.Identity()
 
         # Select actor/critic class
-        if self.config.use_cnn_encoder:
+        if self.config.module_type == "MLP":
+            actor_cls, critic_cls = Actor, Critic
+        elif self.config.module_type == "MLPEncoder":
+            actor_cls, critic_cls = ActorEncoder, CriticEncoder
+        elif self.config.module_type == "CNNEncoder":
             actor_cls, critic_cls = CNNActor, CNNCritic
         else:
+            logger.warning(f"Unknown module type: {self.config.module_type}, using MLP")
             actor_cls, critic_cls = Actor, Critic
 
         self.actor = actor_cls(
             obs_dim=actor_obs_dim,
             action_dim=env.num_actions,
             hidden_dim=self.config.actor_hidden_dim,
+            use_tanh=self.config.use_tanh,
             use_layer_norm=self.config.use_layer_norm,
             log_std_max=self.config.log_std_max,
             log_std_min=self.config.log_std_min,
@@ -175,6 +184,33 @@ class FastSACAgent(BaseAlgo):
             betas=(0.9, 0.95),
         )
 
+        # AMP scaler
+        if self.config.amp:
+            dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16}
+            self.amp_dtype = dtype_map.get(self.config.amp_dtype, torch.bfloat16)
+            self.scaler = GradScaler() if self.amp_dtype == torch.float16 else None
+        else:
+            self.amp_dtype = None
+            self.scaler = None
+        self.scaler = GradScaler(enabled=self.config.amp)
+
+        logger.info("FastSAC network setup complete")
+
+    def setup_learning(self):
+        env = self.env
+
+        # I think this is smarter than defining everything in config like holosoma
+        obs_space = env.observation_space  # gymnasium.spaces.dict.Dict
+        actor_obs_space_shape = [
+            obs_space[k].shape[-1] for k in self.config.actor_obs_keys
+        ]
+        actor_obs_dim = sum(actor_obs_space_shape)
+
+        critic_obs_space_shape = [
+            obs_space[k].shape[-1] for k in self.config.critic_obs_keys
+        ]
+        critic_obs_dim = sum(critic_obs_space_shape)
+
         # Replay buffer
         self.rb = SimpleReplayBuffer(
             n_env=env.num_envs,
@@ -187,18 +223,7 @@ class FastSACAgent(BaseAlgo):
             device=self.device,
         )
 
-        # AMP scaler
-        if self.config.amp:
-            dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16}
-            self.amp_dtype = dtype_map.get(self.config.amp_dtype, torch.bfloat16)
-            self.scaler = GradScaler() if self.amp_dtype == torch.float16 else None
-        else:
-            self.amp_dtype = None
-            self.scaler = None
-        self.scaler = GradScaler(enabled=self.config.amp)
-
         # Logging
-        # TODO: replace with rsl_rl style logger
         self.logger = Logger(
             log_dir=str(self.log_dir),
             cfg=self.config.to_dict(),
@@ -217,8 +242,6 @@ class FastSACAgent(BaseAlgo):
 
         if self.is_multi_gpu:
             self._synchronize_model_parameters(self.actor, self.qnet)
-
-        logger.info("FastSACAgent setup complete")
 
     """
     multi-gpu training utils
@@ -556,6 +579,8 @@ class FastSACAgent(BaseAlgo):
         args = self.config
         device = self.device
 
+        self.setup_learning()
+
         # Initialize the logging writer
         self.logger.init_logging_writer()
 
@@ -588,7 +613,11 @@ class FastSACAgent(BaseAlgo):
         actor_grad_norm = torch.tensor(0.0, device=device)
         # pbar = tqdm.tqdm(total=args.num_learning_iterations, initial=self.global_step)
 
-        while self.global_step <= args.num_learning_iterations:
+        # while self.global_step <= args.num_learning_iterations:
+        for it in range(
+            self.global_step, self.global_step + args.num_learning_iterations
+        ):
+            self.global_step = it
             # Synchronize curriculum metrics across GPUs before rollout
             if self.is_multi_gpu:
                 self._synchronize_curriculum_metrics()
@@ -734,15 +763,6 @@ class FastSACAgent(BaseAlgo):
                             )
                         )
 
-            # Avoid global_step being incremented beyond args.num_learning_iterations, so that the final checkpoint is
-            # saved at exactly args.num_learning_iterations. In the `while` condition, we check for self.global_step <=
-            # args.num_learning_iterations, so that we have complete logging data at the final step too (assuming
-            # `args.num_learning_iterations` is a multiple of `args.logging_interval`).
-            if self.global_step >= args.num_learning_iterations:
-                break
-            self.global_step += 1
-            # pbar.update(1)
-
         if self.is_main_process:
             self.save(
                 os.path.join(self.log_dir, "models", f"model_{self.global_step}.pt")
@@ -818,25 +838,12 @@ class FastSACAgent(BaseAlgo):
 
         return policy_fn
 
-    @torch.no_grad()
-    def evaluate_policy(self, max_eval_steps: int | None = None):
-        obs_dict, _ = self.env.reset()
-
-        for _ in itertools.islice(itertools.count(), max_eval_steps):
-            if self.obs_normalizer:
-                normalized_obs = self.obs_normalizer(obs_dict["policy"], update=False)
-            else:
-                normalized_obs = obs_dict["policy"]
-            # Actions are already scaled by the actor
-            actions, _, _ = self.actor(normalized_obs)
-            obs_dict, _, _, _ = self.env.step(actions)
-
     @property
-    def actor_onnx_wrapper(self):
-        # Use the underlying module for ONNX export
+    def actor_onnx_wrapper(self) -> nn.Module:
+        # Use the underlying module for JIT/ONNX export
         actor = copy.deepcopy(self.actor).to("cpu")
         obs_normalizer = copy.deepcopy(self.obs_normalizer).to("cpu")
-        actor.action_scale = actor.action_scale.to("cpu")  # TODO: brutal?
+        actor.action_scale = actor.action_scale.to("cpu")
 
         class ActorWrapper(nn.Module):
             def __init__(self, actor, obs_normalizer):
@@ -844,7 +851,7 @@ class FastSACAgent(BaseAlgo):
                 self.actor = actor
                 self.obs_normalizer = obs_normalizer
 
-            def forward(self, actor_obs):
+            def forward(self, actor_obs: torch.Tensor) -> torch.Tensor:
                 if self.obs_normalizer is not None:
                     normalized_obs = self.obs_normalizer(actor_obs, update=False)
                 else:

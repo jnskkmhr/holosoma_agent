@@ -1,21 +1,18 @@
 from __future__ import annotations
 
+from typing import Literal
 from dataclasses import dataclass, MISSING
 
 from .symmetry_config import SymmetryConfig
 
 
-class OptimizerConfig:
-    """Configuration for optimizer settings."""
-
-    _target_: str = MISSING
-    """Target optimizer class (e.g., torch.optim.AdamW)."""
-    weight_decay: float = MISSING
-    """Weight decay parameter for the optimizer."""
-
-
+@dataclass
 class LayerConfig:
     """Configuration for neural network layer settings."""
+
+    """
+    mlp settings
+    """
 
     hidden_dims: list[int] = MISSING
     """List of hidden layer dimensions."""
@@ -26,20 +23,21 @@ class LayerConfig:
     use_layer_norm: bool = MISSING
     """Whether to use layer normalization."""
 
+    """
+    mlp encoder settings
+    """
+
     encoder_activation: str = MISSING
     """Activation function name for encoder layers."""
     encoder_output_dim: int | None = MISSING
     """Output dimension for encoder. Only used for encoder modules."""
     encoder_hidden_dims: list[int] | None = MISSING
     """Hidden dimensions for encoder. Only used for encoder modules."""
-    encoder_input_name: str = MISSING
-    """Input name for encoder. Only used for encoder modules."""
-    input_channels: int = MISSING
-    """Number of input channels. Only used for CNN modules."""
-    input_height: int = MISSING
-    """Height of input feature maps. Only used for CNN modules."""
-    input_width: int = MISSING
-    """Width of input feature maps. Only used for CNN modules."""
+
+    """
+    cnn encoder settings
+    """
+
     hidden_channels: tuple[int, ...] | None = MISSING
     """Hidden channel dimensions. Only used for CNN modules."""
     kernel_size: int | tuple[int, ...] = MISSING
@@ -48,24 +46,20 @@ class LayerConfig:
     """Stride for convolutions. Only used for CNN modules."""
     padding: str | int | tuple[str | int, ...] = MISSING
     """Padding mode for convolutions. Only used for CNN modules."""
-    module_input_name: tuple[str, ...] = MISSING
-    """Input names for module. Only used for encoder modules."""
 
 
+@dataclass
 class ModuleConfig:
     """Configuration for neural network modules."""
 
-    module_type: str = MISSING
+    module_type: Literal["MLP", "MLPEncoder", "CNNEncoder"] = MISSING
     """Module type (e.g., MLP)."""
 
-    input_dim: list[str] = MISSING
-    """Input dimension specification."""
-
-    output_dim: list[str | int] = MISSING
-    """Output dimension specification."""
+    obs_keys: list[str] = MISSING
+    """List of observation keys."""
 
     layer_config: LayerConfig = MISSING
-    """Layer configuration settings."""
+    """Feature extraction layer settings."""
 
     min_noise_std: float | None = MISSING
     """Minimum noise standard deviation."""
@@ -74,6 +68,7 @@ class ModuleConfig:
     """Minimum mean noise standard deviation."""
 
 
+@dataclass
 class PPOModuleDictConfig:
     """Configuration for PPO module dictionary."""
 
@@ -93,6 +88,8 @@ class PPOConfig:
     """Total number of training iterations (each = one rollout + update)."""
     save_interval: int = MISSING
     """Save a checkpoint every this many iterations."""
+    logging_interval: int = MISSING
+    """Log training metrics every this many iterations."""
     load_optimizer: bool = MISSING
     """Whether to restore optimizer state when loading a checkpoint."""
     init_at_random_ep_len: bool = MISSING
@@ -123,9 +120,11 @@ class PPOConfig:
     max_grad_norm: float = MISSING
     """Gradient clipping max norm."""
 
-    # ── Learning rate ─────────────────────────────────────────────────────────
+    # ── optimizer ─────────────────────────────────────────────────────────
     actor_learning_rate: float = MISSING
+    actor_optimizer_weight_decay: float = MISSING
     critic_learning_rate: float = MISSING
+    critic_optimizer_weight_decay: float = MISSING
     schedule: str = MISSING
     """LR schedule. ``"adaptive"`` adjusts based on KL, ``"fixed"`` keeps it constant."""
     desired_kl: float = MISSING

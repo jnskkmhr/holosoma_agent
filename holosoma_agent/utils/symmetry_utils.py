@@ -4,6 +4,9 @@ from typing import Dict, List, Sequence
 
 import torch
 
+from holosoma_agent.configs.symmetry_config import SymmetryConfig
+from holosoma_agent.env.vec_env import VecEnv
+
 
 class SymmetryUtils:
     """X-Z plane symmetry utilities for humanoid robots.
@@ -11,69 +14,133 @@ class SymmetryUtils:
     Unlike the holosoma version, this class does **not** read ``env.robot_config``
     or ``env.observation_manager``. All information is passed explicitly at
     construction time, making it fully decoupled from the environment.
-
-    Parameters
-    ----------
-    dof_names : list[str]
-        Ordered list of DOF names in the robot (defines the action vector layout).
-    symmetry_joint_names : dict[str, str]
-        Mapping ``{left_joint_name: right_joint_name}`` for left-right joint swapping.
-    flip_sign_joint_names : list[str]
-        DOF names whose sign must be flipped when mirroring.
-    obs_dims : dict[str, int]
-        Flat dimension of each observation group (history already included).
-    history_lengths : dict[str, int]
-        History factor per observation group.
-    sub_obs_keys : dict[str, list[str]]
-        Ordered sub-observation keys per group (must have a ``mirror_obs_<key>`` method
-        defined on this class for each).
-    obs_dims_single_frame : dict[str, int]
-        Single-frame (no history) flat dimension per group.
-    sub_obs_indices_single_frame : dict[str, dict[str, torch.Tensor]]
-        Per-group, per-sub-key index tensors into the single-frame obs vector.
-    device : str
     """
 
     def __init__(
         self,
-        dof_names: List[str],
-        symmetry_joint_names: Dict[str, str],
-        flip_sign_joint_names: List[str],
-        obs_dims: Dict[str, int],
-        history_lengths: Dict[str, int],
-        sub_obs_keys: Dict[str, List[str]],
-        obs_dims_single_frame: Dict[str, int],
-        sub_obs_indices_single_frame: Dict[str, Dict[str, torch.Tensor]],
-        device: str = "cpu",
+        env: VecEnv,
+        cfg: SymmetryConfig,
+        device: torch.device | str = None,
     ) -> None:
-        self.device = device
-        self.observation_dims = obs_dims
-        self.history_lengths = history_lengths
-        self.sub_observation_keys = sub_obs_keys
-        self.observation_dims_single_frame = obs_dims_single_frame
-        self.sub_observation_indices_single_frame = sub_obs_indices_single_frame
 
-        # Build joint index map
-        name_to_idx = {name: i for i, name in enumerate(dof_names)}
+        self.env = env
+        self.device = device
+        self.cfg = cfg
+
+        # Initialize attributes that will be set during initialization
+        self.observation_dims: Dict[str, int] = {}
+        self.observation_dims_single_frame: Dict[
+            str, int
+        ] = {}  # Dimension without history
+        self.history_lengths: Dict[str, int] = {}
+        self.sub_observation_keys: Dict[str, List[str]] = {}
+        self.sub_observation_indices: Dict[str, Dict[str, torch.Tensor]] = {}
+        self.sub_observation_indices_single_frame: Dict[
+            str, Dict[str, torch.Tensor]
+        ] = {}  # Indices within single frame
+        self.sub_observation_dims: Dict[str, int] = {}
+
+        self.joint_index_map: torch.Tensor = torch.empty(0)
+        self.sign_flip_mask: torch.Tensor = torch.empty(0)
+
+        self._init_observation_config()
+        self._init_joint_config()
+
+    """
+    initialization
+    """
+
+    def _init_observation_config(self) -> None:
+        term_cfgs = self.env.unwrapped.observation_manager.cfg.to_dict()
+        term_names: dict[str, list[str]] = (
+            self.env.unwrapped.observation_manager._group_obs_term_names
+        )
+        term_dims: dict[str, tuple[float]] = (
+            self.env.unwrapped.observation_manager._group_obs_term_dim
+        )
+
+        # initialization
+        self.observation_dims = {group_name: 0 for group_name in term_names.keys()}
+        self.observation_dims_single_frame = {
+            group_name: 0 for group_name in term_names.keys()
+        }
+        self.history_lengths = {group_name: 0 for group_name in term_names.keys()}
+        self.sub_observation_keys = {group_name: [] for group_name in term_names.keys()}
+        self.sub_observation_indices = {
+            group_name: {} for group_name in term_names.keys()
+        }
+        self.sub_observation_indices_single_frame = {
+            group_name: {} for group_name in term_names.keys()
+        }
+        self.sub_observation_dims = {group_name: {} for group_name in term_names.keys()}
+
+        # process
+        # NOTE: only flat observations (batch_size, dim) are supported for now
+        # The way to go about image for CNN is flatten it first, and then reshape later
+        for group_name in term_names.keys():
+            if group_name in [
+                "policy",
+                "policy_encoder",
+                "critic",
+                "critic_encoder",
+            ]:
+                history_length = term_cfgs[group_name]["history_length"]
+                for i, term_name in enumerate(term_names[group_name]):
+                    sub_obs_dim = term_dims[group_name][i][0]
+                    self.observation_dims[group_name] += sub_obs_dim * history_length
+                    self.observation_dims_single_frame[group_name] += sub_obs_dim
+                    self.history_lengths[group_name] = history_length
+
+                    self.sub_observation_keys[group_name].append(term_name)
+                    self.sub_observation_indices[group_name][term_name] = torch.arange(
+                        self.observation_dims[group_name]
+                        - sub_obs_dim * history_length,
+                        self.observation_dims[group_name],
+                    )
+                    self.sub_observation_indices_single_frame[group_name][term_name] = (
+                        torch.arange(
+                            self.observation_dims_single_frame[group_name]
+                            - sub_obs_dim,
+                            self.observation_dims_single_frame[group_name],
+                        )
+                    )
+                    self.sub_observation_dims[group_name][term_name] = sub_obs_dim
+
+    def _init_joint_config(self) -> None:
+        # grab from config
+        dof_names = self.cfg.joint_names
+        symmetry_joint_names = self.cfg.symmetry_joint_names
+        sign_flip_joints = self.cfg.sign_flip_joints
+
+        # create name to index mapping
+        name_to_idx = {name: idx for idx, name in enumerate(dof_names)}
+
+        # Build joint index mapping
         joint_index_mapping = {}
-        for j1, j2 in symmetry_joint_names.items():
-            if j1 in name_to_idx and j2 in name_to_idx:
-                joint_index_mapping[name_to_idx[j1]] = name_to_idx[j2]
+        for joint1, joint2 in symmetry_joint_names.items():
+            if joint1 in name_to_idx and joint2 in name_to_idx:
+                joint_index_mapping[name_to_idx[joint1]] = name_to_idx[joint2]
+
+        # Create joint mapping tensor
         self.joint_index_map = torch.tensor(
             [joint_index_mapping.get(i, i) for i in range(len(dof_names))],
-            device=device,
+            device=self.env.device,
             dtype=torch.long,
         )
 
-        # Build sign flip mask
-        flip_indices = {
-            name_to_idx[n] for n in flip_sign_joint_names if n in name_to_idx
+        # Create sign flip mask
+        sign_flip_indices = {
+            name_to_idx[name] for name in sign_flip_joints if name in name_to_idx
         }
         self.sign_flip_mask = torch.tensor(
-            [-1.0 if i in flip_indices else 1.0 for i in range(len(dof_names))],
-            device=device,
+            [-1.0 if i in sign_flip_indices else 1.0 for i in range(len(dof_names))],
+            device=self.env.device,
             dtype=torch.float,
         )
+
+    """
+    augmentation code
+    """
 
     def augment_observations(
         self, obs: torch.Tensor, obs_list: Sequence[str]
@@ -104,8 +171,9 @@ class SymmetryUtils:
             )
             for sub_key in self.sub_observation_keys[obs_key]:
                 sub_idx = self.sub_observation_indices_single_frame[obs_key][sub_key]
-                mirror_fn = getattr(self, f"mirror_obs_{sub_key}")
-                seg[..., sub_idx] = mirror_fn(seg[..., sub_idx])
+                if hasattr(self, f"mirror_obs_{sub_key}"):
+                    mirror_fn = getattr(self, f"mirror_obs_{sub_key}")
+                    seg[..., sub_idx] = mirror_fn(seg[..., sub_idx])
             mirrored[..., idx : idx + length] = seg.reshape(B, length)
             idx += length
         return mirrored
@@ -183,6 +251,25 @@ class SymmetryUtils:
         """
         projected_gravity[..., 1] = -projected_gravity[..., 1]  # Flip y component
         return projected_gravity
+
+    def mirror_obs_velocity_commands(
+        self, velocity_commands: torch.Tensor
+    ) -> torch.Tensor:
+        """Mirrors the commanded velocity.
+
+        Parameters
+        ----------
+        velocity_commands : torch.Tensor
+            Commanded linear and angular velocity with layout [v_x_cmd, v_y_cmd, ω_z_cmd].
+
+        Returns
+        -------
+        torch.Tensor
+            Mirrored commanded linear and angular velocity with sign negated: [v_x_cmd, -v_y_cmd, -ω_z_cmd].
+        """
+        velocity_commands[..., 1] = -velocity_commands[..., 1]
+        velocity_commands[..., 2] = -velocity_commands[..., 2]
+        return velocity_commands
 
     def mirror_obs_command_lin_vel(self, command_lin_vel: torch.Tensor) -> torch.Tensor:
         """Mirrors the commanded linear velocity.
@@ -302,7 +389,24 @@ class SymmetryUtils:
         cos_phase[..., 0] = -cos_phase[..., 0]
         return cos_phase
 
-    def mirror_obs_dof_pos(self, dof_pos: torch.Tensor) -> torch.Tensor:
+    def mirror_obs_clock(self, clock: torch.Tensor) -> torch.Tensor:
+        """Mirrors the phase for gait timing.
+
+        Parameters
+        ----------
+        clock : torch.Tensor
+            Cosine and sine of gait phase with layout [cos(φ), sin(φ), ...].
+
+        Returns
+        -------
+        torch.Tensor
+            Mirrored phase: [-cos(φ), -sin(φ), ...].
+        """
+        clock[..., 0] = -clock[..., 0]
+        clock[..., 1] = -clock[..., 1]
+        return clock
+
+    def mirror_obs_joint_pos(self, dof_pos: torch.Tensor) -> torch.Tensor:
         """Mirrors the joint positions using joint mapping and sign flipping.
 
         Parameters
@@ -320,7 +424,7 @@ class SymmetryUtils:
         """
         return dof_pos[..., self.joint_index_map] * self.sign_flip_mask
 
-    def mirror_obs_dof_vel(self, dof_vel: torch.Tensor) -> torch.Tensor:
+    def mirror_obs_joint_vel(self, dof_vel: torch.Tensor) -> torch.Tensor:
         """Mirrors the joint velocities (same mapping as joint positions).
 
         Parameters

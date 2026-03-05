@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, MISSING
+from typing import Literal
 
 from .symmetry_config import SymmetryConfig
 
@@ -19,6 +20,7 @@ class FastSACConfig:
     logging_interval: int = MISSING
 
     # ── Networks ──────────────────────────────────────────────────────────────
+    module_type: Literal["MLP", "MLPEncoder", "CNNEncoder"] = MISSING
     actor_hidden_dim: int = MISSING
     critic_hidden_dim: int = MISSING
     use_layer_norm: bool = MISSING
@@ -31,7 +33,6 @@ class FastSACConfig:
     v_max: float = MISSING
 
     # ── CNN encoder ───────────────────────────────────────────────────────────
-    use_cnn_encoder: bool = MISSING
     encoder_obs_key: str = MISSING
     encoder_obs_shape: tuple[int, int, int] = MISSING
 
