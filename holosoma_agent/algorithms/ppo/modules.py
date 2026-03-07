@@ -164,6 +164,7 @@ def build_mlp_layer(
     layers = []
     activation = getattr(nn, layer_config.activation)()
     dropout = layer_config.dropout_prob
+    use_layer_norm = layer_config.use_layer_norm
 
     if len(hidden_dims) == 0:
         # No hidden layer, just one linear layer
@@ -171,6 +172,8 @@ def build_mlp_layer(
     else:
         # First hidden layer
         layers.append(nn.Linear(input_dim, hidden_dims[0]))
+        if use_layer_norm:
+            layers.append(nn.LayerNorm(hidden_dims[0]))
         layers.append(activation)
         if dropout > 0:
             layers.append(nn.Dropout(p=dropout))
@@ -183,6 +186,8 @@ def build_mlp_layer(
                 layers.append(
                     nn.Linear(hidden_dims[layer_idx], hidden_dims[layer_idx + 1])
                 )
+                if use_layer_norm:
+                    layers.append(nn.LayerNorm(hidden_dims[layer_idx + 1]))
                 layers.append(activation)
                 if dropout > 0:
                     layers.append(nn.Dropout(p=dropout))

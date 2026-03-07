@@ -643,18 +643,6 @@ class PPO(BaseAlgo):
             return loaded_dict.get("infos")
         return None
 
-    def load_sac_actor(self, ckpt_path: str | None) -> None:
-        if not ckpt_path:
-            return
-
-        loaded_dict = torch.load(ckpt_path, map_location=self.device)
-
-        actor_state_dict = loaded_dict["actor_state_dict"]
-        self.actor.load_state_dict(actor_state_dict)
-
-        self.log_alpha.data.copy_(loaded_dict["log_alpha"].to(self.device))
-        self.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
-
     def save(self, path, infos=None):
         checkpoint_dict = {
             "actor_model_state_dict": self.actor.state_dict(),

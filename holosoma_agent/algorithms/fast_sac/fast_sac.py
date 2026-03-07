@@ -124,6 +124,7 @@ class FastSACAgent(BaseAlgo):
             log_std_min=self.config.log_std_min,
             device=self.device,
             action_scale=action_scale,
+            activation=self.config.activation,
         ).to(self.device)
 
         self.qnet = critic_cls(
@@ -136,6 +137,7 @@ class FastSACAgent(BaseAlgo):
             use_layer_norm=self.config.use_layer_norm,
             num_q_networks=self.config.num_q_networks,
             device=self.device,
+            activation=self.config.activation,
         ).to(self.device)
 
         print(self.actor)
@@ -762,11 +764,25 @@ class FastSACAgent(BaseAlgo):
                                 f"model_{self.global_step}.pt",
                             )
                         )
+                        if args.save_rsl_rl_wrapper:
+                            self.save_rsl_rl_wrapper(
+                                os.path.join(
+                                    self.log_dir,
+                                    "rsl_rl_models",
+                                    f"model_{self.global_step}.pt",
+                                )
+                            )
 
         if self.is_main_process:
             self.save(
                 os.path.join(self.log_dir, "models", f"model_{self.global_step}.pt")
             )
+            if args.save_rsl_rl_wrapper:
+                self.save_rsl_rl_wrapper(
+                    os.path.join(
+                        self.log_dir, "rsl_rl_models", f"model_{self.global_step}.pt"
+                    )
+                )
 
     def save(self, path: str) -> None:  # type: ignore[override]
         save_params(
@@ -861,3 +877,104 @@ class FastSACAgent(BaseAlgo):
                 return action
 
         return ActorWrapper(actor, obs_normalizer if self.obs_normalizer else None)
+
+    """
+    finetuning utility
+    """
+
+    def get_rsl_rl_policy_wrapper(self) -> nn.Module:
+        """Return an nn.Module whose state_dict is compatible with rsl_rl's ActorCritic.
+
+        rsl_rl v3.1.2 interface requirements (actor side):
+          - ``self.actor``              : nn.Module, called as ``actor(obs)``
+          - ``self.actor_obs_normalizer``: nn.Module (EmpiricalNormalization or Identity)
+          - When ``state_dependent_std=True`` and ``noise_std_type="log"``:
+              ``actor(obs)`` must return shape ``[batch, 2, action_dim]``
+              where ``[..., 0, :]`` = mean (pre-tanh) and ``[..., 1, :]`` = log_std
+
+        FastSAC → rsl_rl mapping:
+          actor.net + actor.fc_mean + actor.fc_log_std  →  self.actor  (fused adapter)
+          obs_normalizer                                →  self.actor_obs_normalizer
+
+        Note: rsl_rl does NOT apply tanh squashing internally — it uses a plain Normal
+        distribution.  If your downstream policy runner expects squashed actions, you
+        will need to add that at the usage site.
+        """
+
+        class SACActorForRSLRL(nn.Module):
+            """Adapter that maps FastSAC's (net, fc_mean, fc_log_std) to rsl_rl's
+            expected actor interface: forward(obs) -> Tensor[batch, 2, action_dim].
+
+            Index 0 along dim=-2 is the raw mean (pre-tanh).
+            Index 1 along dim=-2 is the log_std (after tanh-squash to [log_std_min, log_std_max]).
+            """
+
+            def __init__(
+                self,
+                net: nn.Sequential,
+                fc_mean: nn.Linear,
+                fc_log_std: nn.Linear,
+            ):
+                super().__init__()
+                self.net = net
+                self.fc_mean = fc_mean
+                self.fc_log_std = fc_log_std
+
+            def forward(self, obs: torch.Tensor) -> torch.Tensor:
+                x = self.net(obs)
+                mean = self.fc_mean(x)  # [batch, action_dim]
+                log_std = self.fc_log_std(x)  # [batch, action_dim]
+                # Stack to [batch, 2, action_dim] as rsl_rl expects
+                return torch.stack([mean, log_std], dim=-2)
+
+        class RSLRLPolicyWrapper(nn.Module):
+            """Drop-in replacement for rsl_rl's ActorCritic.
+
+            Attributes mirror exactly what OnPolicyRunner / export utilities expect:
+              self.actor                – fused mean+log_std network
+              self.actor_obs_normalizer  – actor observation normalizer
+              self.critic_obs_normalizer – critic observation normalizer
+            """
+
+            def __init__(
+                self,
+                sac_actor_adapter: nn.Module,
+                actor_obs_normalizer: nn.Module,
+                critic_obs_normalizer: nn.Module,
+            ):
+                super().__init__()
+                self.actor = sac_actor_adapter
+                self.actor_obs_normalizer = actor_obs_normalizer
+                self.critic_obs_normalizer = critic_obs_normalizer
+
+        actor = copy.deepcopy(self.actor)
+        obs_normalizer = copy.deepcopy(self.obs_normalizer)
+        critic_obs_normalizer = copy.deepcopy(self.critic_obs_normalizer)
+
+        sac_adapter = SACActorForRSLRL(
+            net=actor.net,
+            fc_mean=actor.fc_mean,
+            fc_log_std=actor.fc_log_std,
+        )
+
+        return RSLRLPolicyWrapper(
+            sac_actor_adapter=sac_adapter,
+            actor_obs_normalizer=obs_normalizer,
+            critic_obs_normalizer=critic_obs_normalizer,
+        )
+
+    def save_rsl_rl_wrapper(self, path: str) -> None:
+        """Save the rsl_rl-compatible policy wrapper state dict to disk.
+
+        The saved file can be loaded by rsl_rl's OnPolicyRunner or any code that
+        calls ``torch.load`` and ``model.load_state_dict``.
+        """
+        wrapper = self.get_rsl_rl_policy_wrapper()
+        save_dict = {
+            "actor_state_dict": wrapper.actor.state_dict(),
+            "actor_obs_normalizer_state_dict": wrapper.actor_obs_normalizer.state_dict(),
+            "critic_obs_normalizer_state_dict": wrapper.critic_obs_normalizer.state_dict(),
+        }
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(save_dict, path)
+        logger.info(f"Saved rsl_rl-compatible wrapper to {path}")

@@ -322,11 +322,6 @@ class EmpiricalNormalization(nn.Module):
     def forward(
         self, x: torch.Tensor, center: bool = True, update: bool = True
     ) -> torch.Tensor:
-        # if x.shape[1:] != self._mean.shape[1:]:
-        #     raise ValueError(
-        #         f"Expected input of shape (*,{self._mean.shape[1:]}), got {x.shape}"
-        #     )
-
         if self.training and update:
             self.update(x)
         if center:

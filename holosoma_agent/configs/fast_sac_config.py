@@ -21,6 +21,7 @@ class FastSACConfig:
 
     # ── Networks ──────────────────────────────────────────────────────────────
     module_type: Literal["MLP", "MLPEncoder", "CNNEncoder"] = MISSING
+    activation: Literal["ReLU", "ELU", "SiLU"] = MISSING
     actor_hidden_dim: int = MISSING
     critic_hidden_dim: int = MISSING
     use_layer_norm: bool = MISSING
@@ -86,3 +87,6 @@ class FastSACConfig:
     """Automatic Mixed Precision."""
     amp_dtype: str = MISSING
     """AMP dtype: ``"bf16"`` or ``"fp16"``."""
+
+    # log
+    save_rsl_rl_wrapper: bool = MISSING

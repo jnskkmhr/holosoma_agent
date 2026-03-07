@@ -26,6 +26,7 @@ class Actor(nn.Module):
         use_layer_norm: bool = True,
         device: torch.device | str | None = None,
         action_scale: torch.Tensor | None = None,
+        activation: str = "SiLU",
     ):
         super().__init__()
 
@@ -38,6 +39,7 @@ class Actor(nn.Module):
 
         self.use_tanh = use_tanh
         self.use_layer_norm = use_layer_norm
+        self.activation = activation
 
         if device is not None:
             self.device = torch.device(device)
@@ -60,7 +62,7 @@ class Actor(nn.Module):
             layers.append(nn.Linear(in_dim, out_dim, device=self.device))
             if self.use_layer_norm:
                 layers.append(nn.LayerNorm(out_dim, device=self.device))
-            layers.append(nn.SiLU())
+            layers.append(getattr(nn, self.activation)())
         self.net = nn.Sequential(*layers)
 
         last_dim = self.hidden_dim[-1]
@@ -159,6 +161,7 @@ class ActorEncoder(Actor):
         use_layer_norm: bool = True,
         device: torch.device | str | None = None,
         action_scale: torch.Tensor | None = None,
+        activation: str = "SiLU",
     ):
         super().__init__(
             obs_dim,
@@ -186,6 +189,7 @@ class CNNActor(Actor):
         use_layer_norm: bool = True,
         device: torch.device | str | None = None,
         action_scale: torch.Tensor | None = None,
+        activation: str = "SiLU",
     ):
         super().__init__(
             obs_dim,
@@ -303,6 +307,7 @@ class DistributionalQNetwork(nn.Module):
         v_max: float,
         use_layer_norm: bool = True,
         device: torch.device | None = None,
+        activation: str = "SiLU",
     ):
         super().__init__()
 
@@ -322,7 +327,7 @@ class DistributionalQNetwork(nn.Module):
             layers.append(nn.Linear(in_dim, out_dim, device=self.device))
             if use_layer_norm:
                 layers.append(nn.LayerNorm(out_dim, device=self.device))
-            layers.append(nn.SiLU())
+            layers.append(getattr(nn, activation)())
         layers.append(nn.Linear(dims[-1], num_atoms, device=self.device))
         self.net = nn.Sequential(*layers)
 
@@ -401,6 +406,7 @@ class Critic(nn.Module):
         use_layer_norm: bool = True,
         num_q_networks: int = 2,
         device: torch.device | None = None,
+        activation: str = "SiLU",
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -410,6 +416,7 @@ class Critic(nn.Module):
         self.v_min = v_min
         self.v_max = v_max
         self.use_layer_norm = use_layer_norm
+        self.activation = activation
         if num_q_networks < 1:
             raise ValueError("num_q_networks must be at least 1")
         self.num_q_networks = num_q_networks
@@ -435,6 +442,7 @@ class Critic(nn.Module):
                     v_max=self.v_max,
                     use_layer_norm=self.use_layer_norm,
                     device=self.device,
+                    activation=self.activation,
                 )
                 for _ in range(self.num_q_networks)
             ]
@@ -487,6 +495,7 @@ class CriticEncoder(Critic):
         use_layer_norm: bool = True,
         num_q_networks: int = 2,
         device: torch.device | None = None,
+        activation: str = "SiLU",
     ):
         super().__init__(
             obs_dim,
@@ -498,6 +507,7 @@ class CriticEncoder(Critic):
             use_layer_norm,
             num_q_networks,
             device,
+            activation,
         )
 
 
@@ -516,6 +526,7 @@ class CNNCritic(Critic):
         use_layer_norm: bool = True,
         num_q_networks: int = 2,
         device: torch.device | None = None,
+        activation: str = "SiLU",
     ):
         super().__init__(
             obs_dim,
@@ -527,6 +538,7 @@ class CNNCritic(Critic):
             use_layer_norm,
             num_q_networks,
             device,
+            activation,
         )
 
 
