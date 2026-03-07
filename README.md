@@ -12,8 +12,8 @@ uv pip install -e .
 - [x] Implement symmetry augmentation 
 - [x] Config refactoring
 - [x] PPO implementation 
-- [ ] PPO-SAC actor compatibility so that finetuning is possible 
-- [ ] MLP/CNN encoder check 
+- [x] PPO-SAC actor compatibility so that finetuning is possible 
+- [ ] MLP/CNN encoder integration
 - [ ] Refactoring 
-- [ ] Add documentation
+- [ ] Add IsaacLab documentation
 - [ ] Multi-GPU training
